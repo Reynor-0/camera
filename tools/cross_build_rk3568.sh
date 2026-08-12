@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+
+# 为 64 位 RK3568 Linux 用户态配置、编译并安装 camera_demo。
+#
+# 必需/可选环境变量：
+#   RK3568_CROSS_COMPILE  交叉工具前缀，默认 aarch64-linux-gnu-
+#   RK3568_SYSROOT        目标 rootfs/sysroot；当前 probe 可省略，DRM 阶段必须提供
+#   RK3568_BUILD_DIR      构建目录，默认 <project>/build-rk3568
+#   RK3568_STAGE_DIR      安装暂存目录，默认 <build-dir>/stage
+#   RK3568_CPU_FLAGS      可选，例如 -mcpu=cortex-a55
+
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+project_dir="$(cd "${script_dir}/.." && pwd)"
+
+cross_prefix="${RK3568_CROSS_COMPILE:-aarch64-linux-gnu-}"
+build_dir="${RK3568_BUILD_DIR:-${project_dir}/build-rk3568}"
+stage_dir="${RK3568_STAGE_DIR:-${build_dir}/stage}"
+sysroot="${RK3568_SYSROOT:-}"
+cpu_flags="${RK3568_CPU_FLAGS:-}"
+cxx_compiler="${cross_prefix}g++"
+readelf_tool="${cross_prefix}readelf"
+
+if ! command -v "${cxx_compiler}" >/dev/null 2>&1; then
+    echo "error: RK3568 cross compiler was not found: ${cxx_compiler}" >&2
+    echo "set RK3568_CROSS_COMPILE to the full SDK tool prefix." >&2
+    echo "example: export RK3568_CROSS_COMPILE=/opt/rk-sdk/bin/aarch64-linux-gnu-" >&2
+    exit 1
+fi
+
+if ! command -v "${readelf_tool}" >/dev/null 2>&1; then
+    echo "error: RK3568 ELF inspection tool was not found: ${readelf_tool}" >&2
+    echo "the compiler prefix must identify a complete AArch64 toolchain." >&2
+    exit 1
+fi
+
+if [[ -n "${sysroot}" && ! -d "${sysroot}" ]]; then
+    echo "error: RK3568_SYSROOT is not a directory: ${sysroot}" >&2
+    exit 1
+fi
+
+cmake_args=(
+    -S "${project_dir}"
+    -B "${build_dir}"
+    -DCMAKE_BUILD_TYPE=Release
+    -DCMAKE_TOOLCHAIN_FILE="${project_dir}/cmake/toolchains/rk3568-aarch64.cmake"
+    -DRK3568_CROSS_COMPILE="${cross_prefix}"
+    -DRK3568_CPU_FLAGS="${cpu_flags}"
+    -DCMAKE_INSTALL_PREFIX=/usr/local
+)
+
+if [[ -n "${sysroot}" ]]; then
+    cmake_args+=("-DRK3568_SYSROOT=${sysroot}")
+else
+    echo "warning: RK3568_SYSROOT is empty; the compiler's built-in sysroot will be used." >&2
+    echo "warning: provide the board SDK/rootfs sysroot before adding target libraries such as libdrm." >&2
+fi
+
+cmake "${cmake_args[@]}"
+cmake --build "${build_dir}" --parallel
+cmake --install "${build_dir}" --prefix "${stage_dir}"
+
+binary="${stage_dir}/bin/camera_demo"
+if [[ ! -f "${binary}" ]]; then
+    echo "error: expected output was not installed: ${binary}" >&2
+    exit 1
+fi
+
+# readelf 来自交叉工具链，不依赖宿主机 file 命令对架构名称的输出格式。
+machine="$("${readelf_tool}" -h "${binary}" | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')"
+if [[ "${machine}" != *AArch64* ]]; then
+    echo "error: output is not an AArch64 ELF: ${machine}" >&2
+    exit 1
+fi
+
+echo "RK3568 build completed."
+echo "  ELF machine: ${machine}"
+echo "  Binary:      ${binary}"

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# 使用 vivid 创建的虚拟 capture nodes 验证 camera_demo 第一阶段功能。
+# 使用 vivid 创建的虚拟 capture nodes 验证 camera_demo 的 probe 和 MMAP 采集。
 #
 # 本脚本不加载或卸载内核模块。先运行：
 #   sudo ./tools/virtual_camera_modules.sh load
@@ -40,6 +40,7 @@ fi
 seen_single=0
 seen_multi=0
 passed=0
+capture_passed=0
 
 for node in "${vivid_nodes[@]}"; do
     echo "===== Testing ${node} ====="
@@ -64,6 +65,27 @@ for node in "${vivid_nodes[@]}"; do
         fi
 
         passed=$((passed + 1))
+
+        echo "----- Capturing 100 YUYV frames from ${node} -----"
+        # vivid 的 single-planar 和 multi-planar 实例都公开 YUYV。这里使用相同格式
+        # 验证两套 ioctl 结构分支；专门的多 memory-plane 格式留给扩展测试矩阵。
+        if capture_output="$("${camera_demo}" --capture "${node}" \
+            --width 640 \
+            --height 360 \
+            --format YUYV \
+            --buffers 4 \
+            --frames 100 \
+            --timeout-ms 2000 2>&1)"; then
+            echo "${capture_output}"
+            if [[ "${capture_output}" != *"Capture complete: captured=100"* ]]; then
+                echo "error: ${node} did not report 100 captured frames." >&2
+                continue
+            fi
+            capture_passed=$((capture_passed + 1))
+        else
+            echo "${capture_output}" >&2
+            echo "error: MMAP capture failed for ${node}." >&2
+        fi
     else
         echo "${output}" >&2
         echo "error: camera_demo failed for ${node}." >&2
@@ -76,4 +98,9 @@ if [[ "${seen_single}" -ne 1 || "${seen_multi}" -ne 1 ]]; then
     exit 1
 fi
 
-echo "Virtual V4L2 probe test passed (${passed} nodes)."
+if [[ "${capture_passed}" -ne "${passed}" ]]; then
+    echo "error: probe passed on ${passed} nodes, but capture passed on ${capture_passed}." >&2
+    exit 1
+fi
+
+echo "Virtual V4L2 probe and capture test passed (${passed} nodes)."

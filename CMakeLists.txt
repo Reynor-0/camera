@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(camera_demo LANGUAGES CXX)
+project(camera_demo VERSION 0.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -14,6 +14,7 @@ option(CAMERA_DEMO_WARNINGS_AS_ERRORS
 
 add_executable(camera_demo
     src/main.cpp
+    src/v4l2_buffer.cpp
     src/v4l2_device.cpp
 )
 
@@ -30,6 +31,12 @@ target_compile_options(camera_demo PRIVATE
     -Wall
     -Wextra
     -Wpedantic
+)
+
+# 将版本作为普通字符串宏传给程序。命令行 `--version` 不依赖 Git 或构建主机上
+# 额外生成的文件，因此也适用于离线的 RK3568 交叉编译环境。
+target_compile_definitions(camera_demo PRIVATE
+    CAMERA_DEMO_VERSION="${PROJECT_VERSION}"
 )
 
 if(CAMERA_DEMO_WARNINGS_AS_ERRORS)

@@ -232,6 +232,23 @@ memory plane。
 - 顶层 `main()` 捕获异常、打印上下文并返回非零退出码。
 - 错误路径同样必须满足 fd、mmap、framebuffer 等资源的释放顺序。
 
+## 7.1 命令行程序的自描述要求
+
+交付可执行文件时，用户可能看不到源码和项目文档。每个面向用户的命令行程序必须
+提供：
+
+```bash
+program --help
+program -h
+program --version
+```
+
+- `-h/--help` 必须在访问设备或文件之前处理，向 stdout 输出完整用法并返回 0。
+- `--version` 必须向 stdout 输出程序版本和目标架构并返回 0。
+- 参数错误向 stderr 输出原因、返回非零，并提示用户运行 `--help`。
+- 帮助中必须包含模式说明、全部参数、默认值、单位和至少一个可运行示例。
+- 帮助和版本命令不得要求 `/dev/video*` 存在或具有设备权限。
+
 ## 8. 编译与提交前检查
 
 普通构建：
@@ -266,6 +283,15 @@ rg -- "-std=" build/compile_commands.json
 没有真实摄像头的开发主机，应按照
 [虚拟摄像头测试指南](virtual_camera_testing.md) 使用 vivid 同时覆盖 single-planar
 和 multi-planar API。虚拟设备测试通过不能替代 RK3568 实板测试。
+
+修改 V4L2 buffer queue 后，至少运行：
+
+```bash
+./tools/test_virtual_v4l2_probe.sh
+```
+
+该测试不仅枚举格式，还必须实际完成 MMAP streaming 和固定帧数的 QBUF/DQBUF
+循环；只有 probe 输出正确不能视为 buffer queue 验收通过。
 
 RK3568 交叉构建还需要检查：
 

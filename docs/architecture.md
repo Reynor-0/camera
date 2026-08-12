@@ -532,3 +532,6 @@ DisplayBackend
 - [DMA-BUF buffer exchange](https://docs.kernel.org/userspace-api/dma-buf-alloc-exchange.html)
 - [DRM userspace API](https://docs.kernel.org/gpu/drm-uapi.html)
 - [DRM/KMS](https://docs.kernel.org/gpu/drm-kms.html)
+
+下一项实际开发工作按
+[V4L2 MMAP 连续采集计划](v4l2_mmap_capture_plan.md)执行。

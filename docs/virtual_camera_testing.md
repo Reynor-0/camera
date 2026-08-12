@@ -116,6 +116,8 @@ instance 1: V4L2 multi-planar capture API
 - 输出包含格式列表。
 - 至少覆盖一个 single-planar node。
 - 至少覆盖一个 multi-planar node。
+- 每个 vivid node 使用 4 个 MMAP buffers 连续采集 100 帧。
+- `REQBUFS/QUERYBUF/mmap/QBUF/STREAMON/poll/DQBUF/QBUF/STREAMOFF` 全链路成功。
 
 也可以手动运行输出中列出的节点：
 
@@ -123,6 +125,27 @@ instance 1: V4L2 multi-planar capture API
 ./build/camera_demo /dev/video0
 ./build/camera_demo /dev/video1
 ```
+
+直接运行 MMAP 连续采集：
+
+```bash
+./build/camera_demo --capture /dev/video0 \
+  --width 1920 \
+  --height 1080 \
+  --format NV12 \
+  --buffers 4 \
+  --frames 1000 \
+  --timeout-ms 2000
+```
+
+成功结束时应看到：
+
+```text
+Capture complete: captured=1000 errors=0 timeouts=0 sequence_gaps=0
+```
+
+`errors`、`timeouts` 或 `sequence_gaps` 非零不一定都是程序缺陷，但需要结合逐帧
+flags、虚拟驱动设置和系统负载分析，不能直接忽略。
 
 设置 vivid webcam 支持的离散格式示例：
 

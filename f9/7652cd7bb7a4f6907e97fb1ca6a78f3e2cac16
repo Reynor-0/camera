@@ -1,0 +1,39 @@
+inc/v4l2_buffer.hpp
+  s_fde35fba74955f::t_832df24e0825d6 49-56,88-89,94-95,139-175,279-281,307-312
+src/main.cpp
+  s_fde35fba74955f::t_5664e32c4692cd 455
+  s_fde35fba74955f::t_832df24e0825d6 72-74,157-164,166,190,345-357,411-413,456,462
+.gitignore
+  s_fde35fba74955f::t_94a3cc551d0885 7
+docs/virtual_camera_testing.md
+  s_fde35fba74955f::t_94a3cc551d0885 120-122,140-141,147-149,153
+tools/test_virtual_v4l2_probe.sh
+  s_fde35fba74955f::t_5664e32c4692cd 3,78,81-84,92,111
+src/v4l2_buffer.cpp
+  s_fde35fba74955f::t_832df24e0825d6 6,8,229-338,501,516,614-617,633-647
+docs/dma_buf_export_plan.md
+  s_fde35fba74955f::t_5664e32c4692cd 1-155
+docs/development_guidelines.md
+  s_fde35fba74955f::t_94a3cc551d0885 305-307
+  s_fde35fba74955f::t_5664e32c4692cd 225-236
+CMakeLists.txt
+  s_fde35fba74955f::t_832df24e0825d6 3
+docs/architecture.md
+  s_fde35fba74955f::t_5664e32c4692cd 536-538
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "f97652cd7bb7a4f6907e97fb1ca6a78f3e2cac16",
+  "prompts": {},
+  "sessions": {
+    "s_fde35fba74955f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ff461-b97b-7f81-9faf-854f760dd629",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Reynor Zhang <erikjhagins3@gmail.com>"
+    }
+  }
+}

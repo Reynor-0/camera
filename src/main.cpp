@@ -69,6 +69,9 @@ struct CaptureOptions {
 
     /** 每次 poll 等待帧的最长时间，单位为毫秒。 */
     int timeout_ms{2000};
+
+    /** 是否在开始采集前将全部 MMAP memory planes 导出为 DMA-BUF fd。 */
+    bool export_dma_buffers{false};
 };
 
 /**
@@ -151,13 +154,18 @@ CaptureOptions parseCaptureOptions(int argc, char* argv[])
     CaptureOptions options;
     options.device = argv[2];
 
-    for (int index = 3; index < argc; index += 2) {
-        if (index + 1 >= argc) {
-            throw std::invalid_argument(std::string(argv[index]) +
-                                        " requires a value");
+    for (int index = 3; index < argc;) {
+        const std::string name = argv[index];
+        if (name == "--export-dmabuf") {
+            options.export_dma_buffers = true;
+            ++index;
+            continue;
         }
 
-        const std::string name = argv[index];
+        if (index + 1 >= argc) {
+            throw std::invalid_argument(name + " requires a value");
+        }
+
         const std::string value = argv[index + 1];
         if (name == "--width") {
             options.width = parseUint32(value, name);
@@ -179,6 +187,7 @@ CaptureOptions parseCaptureOptions(int argc, char* argv[])
         } else {
             throw std::invalid_argument("unknown capture option: " + name);
         }
+        index += 2;
     }
 
     if (options.width == 0U || options.height == 0U ||
@@ -333,6 +342,19 @@ int runCapture(const CaptureOptions& options)
     queue.requestBuffers(options.buffer_count);
     std::cout << "Buffers: requested=" << options.buffer_count
               << ", actual=" << queue.bufferCount() << '\n';
+    if (options.export_dma_buffers) {
+        queue.exportDmaBuffers();
+        std::cout << "DMA-BUF exports:\n";
+        for (std::size_t buffer = 0U; buffer < queue.bufferCount(); ++buffer) {
+            for (std::uint32_t plane = 0U; plane < queue.planeCount(); ++plane) {
+                std::cout << "  buffer=" << buffer
+                          << " plane=" << plane
+                          << " fd=" << queue.dmaBufFd(
+                                 static_cast<std::uint32_t>(buffer), plane)
+                          << '\n';
+            }
+        }
+    }
     queue.queueAll();
     queue.start();
 
@@ -386,7 +408,9 @@ int runCapture(const CaptureOptions& options)
             std::cout << "  plane=" << plane
                       << " bytesused=" << frame.planes[plane].bytes_used
                       << " data_offset=" << frame.planes[plane].data_offset
-                      << " mapped=" << frame.planes[plane].mapped_length << '\n';
+                      << " mapped=" << frame.planes[plane].mapped_length
+                      << " dma_buf_fd=" << frame.planes[plane].dma_buf_fd
+                      << '\n';
         }
 
         // 本阶段只读取 metadata，不保留帧。QBUF 成功后 frame.data 指针即失效。
@@ -428,13 +452,14 @@ void printUsage(const char* program, std::ostream& output)
         << "  --format FOURCC requested format (default NV12)\n"
         << "  --buffers N     requested MMAP buffers (default 4)\n"
         << "  --frames N      frames to capture (default 100)\n"
-        << "  --timeout-ms N  poll timeout (default 2000)\n\n"
+        << "  --timeout-ms N  poll timeout (default 2000)\n"
+        << "  --export-dmabuf export every MMAP memory plane before capture\n\n"
         << "Examples:\n"
         << "  " << program << " /dev/video0\n"
         << "  " << program << " /dev/video0 1920 1080 NV12\n"
         << "  " << program
         << " --capture /dev/video0 --width 640 --height 360"
-           " --format NV12 --frames 100\n";
+           " --format NV12 --frames 100 --export-dmabuf\n";
 }
 
 /**

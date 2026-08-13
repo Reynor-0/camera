@@ -3,7 +3,9 @@
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 
+#include <fcntl.h>
 #include <poll.h>
+#include <unistd.h>
 
 #include <cerrno>
 #include <cstring>
@@ -224,6 +226,116 @@ void V4L2BufferQueue::requestBuffers(std::uint32_t requested_count)
     }
 }
 
+void V4L2BufferQueue::exportDmaBuffers()
+{
+    if (state_ != V4L2BufferQueueState::BuffersAllocated) {
+        throw std::logic_error(
+            "exportDmaBuffers requires the BuffersAllocated state");
+    }
+    if (buffers_.empty()) {
+        throw std::logic_error(
+            "exportDmaBuffers requires at least one allocated buffer");
+    }
+    if (dmaBuffersExported()) {
+        throw std::logic_error("DMA-BUF planes have already been exported");
+    }
+
+    // VIDIOC_EXPBUF 只适用于由 V4L2_MEMORY_MMAP 分配的 queue。它不会重新分配
+    // 或复制像素数据，而是为 index/plane 对应的底层内存创建一个共享 fd。
+    // single-planar API 的 plane 必须为 0；multi-planar API 则逐 memory plane 导出。
+    try {
+        for (std::size_t buffer_index = 0U;
+             buffer_index < buffers_.size();
+             ++buffer_index) {
+            BufferSlot& slot = buffers_[buffer_index];
+            if (slot.planes.empty()) {
+                throw std::runtime_error(
+                    "cannot export an empty V4L2 buffer for " + device_path_);
+            }
+
+            for (std::size_t plane_index = 0U;
+                 plane_index < slot.planes.size();
+                 ++plane_index) {
+                MappedPlane& mapping = slot.planes[plane_index];
+                if (mapping.dma_buf_fd >= 0) {
+                    throw std::logic_error(
+                        "exportDmaBuffers found a partially exported queue");
+                }
+
+                v4l2_exportbuffer export_buffer{};
+                export_buffer.type = capture_type_;
+                export_buffer.index =
+                    static_cast<std::uint32_t>(buffer_index);
+                export_buffer.plane =
+                    static_cast<std::uint32_t>(plane_index);
+                // O_CLOEXEC 防止 exec 后 fd 泄漏；O_RDWR 允许 importer 按其需求
+                // 建立读写映射。DRM scanout 本身只读取图像内容。
+                export_buffer.flags = O_CLOEXEC | O_RDWR;
+
+                if (xioctl(fd_, VIDIOC_EXPBUF, &export_buffer) < 0) {
+                    throw systemError("VIDIOC_EXPBUF", device_path_);
+                }
+                if (export_buffer.fd < 0) {
+                    throw std::runtime_error(
+                        "VIDIOC_EXPBUF returned an invalid fd for " +
+                        device_path_);
+                }
+
+                // 从 ioctl 成功返回开始，该 fd 由应用拥有；立即记录到 RAII 对象的
+                // 清理路径中，避免后续 plane 导出失败时发生 fd 泄漏。
+                mapping.dma_buf_fd = export_buffer.fd;
+            }
+        }
+    } catch (...) {
+        // 失败时只撤销本阶段创建的 fd。MMAP 映射和内核 buffer 保持有效，queue
+        // 仍处于 BuffersAllocated，调用方可以记录错误后继续纯 MMAP 采集或重试。
+        closeDmaBufFds();
+        throw;
+    }
+}
+
+int V4L2BufferQueue::dmaBufFd(std::uint32_t buffer_index,
+                              std::uint32_t plane_index) const
+{
+    if (buffer_index >= buffers_.size()) {
+        throw std::out_of_range("DMA-BUF buffer index is outside the pool");
+    }
+    const BufferSlot& slot = buffers_[static_cast<std::size_t>(buffer_index)];
+    if (plane_index >= slot.planes.size()) {
+        throw std::out_of_range("DMA-BUF plane index is outside the buffer");
+    }
+
+    const int fd = slot.planes[static_cast<std::size_t>(plane_index)].dma_buf_fd;
+    if (fd < 0) {
+        throw std::logic_error("the requested memory plane is not exported");
+    }
+    return fd;
+}
+
+bool V4L2BufferQueue::dmaBuffersExported() const noexcept
+{
+    if (buffers_.empty()) {
+        return false;
+    }
+
+    for (std::size_t buffer_index = 0U;
+         buffer_index < buffers_.size();
+         ++buffer_index) {
+        const std::vector<MappedPlane>& planes = buffers_[buffer_index].planes;
+        if (planes.empty()) {
+            return false;
+        }
+        for (std::size_t plane_index = 0U;
+             plane_index < planes.size();
+             ++plane_index) {
+            if (planes[plane_index].dma_buf_fd < 0) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 void V4L2BufferQueue::queueAll()
 {
     if (state_ != V4L2BufferQueueState::BuffersAllocated) {
@@ -386,6 +498,7 @@ bool V4L2BufferQueue::tryDequeue(CapturedFrame* frame)
             captured.mapped_length = mapping.length;
             captured.bytes_used = planes[plane].bytesused;
             captured.data_offset = planes[plane].data_offset;
+            captured.dma_buf_fd = mapping.dma_buf_fd;
         }
     } else {
         if (slot.planes.size() != 1U ||
@@ -400,6 +513,7 @@ bool V4L2BufferQueue::tryDequeue(CapturedFrame* frame)
         result.planes[0U].mapped_length = slot.planes[0U].length;
         result.planes[0U].bytes_used = buffer.bytesused;
         result.planes[0U].data_offset = 0U;
+        result.planes[0U].dma_buf_fd = slot.planes[0U].dma_buf_fd;
     }
 
     // 只有 metadata 完整验证后才更新所有权并提交输出对象。
@@ -497,6 +611,10 @@ void V4L2BufferQueue::stopNoThrow() noexcept
 
 void V4L2BufferQueue::releaseMappings() noexcept
 {
+    // 某些驱动不支持在仍存在导出引用时释放 V4L2 buffer。先关闭本对象拥有的
+    // DMA-BUF fd，再解除 CPU 映射，最后由调用方执行 REQBUFS(count=0)。
+    closeDmaBufFds();
+
     for (std::size_t buffer = 0U; buffer < buffers_.size(); ++buffer) {
         std::vector<MappedPlane>& planes = buffers_[buffer].planes;
         for (std::size_t plane = 0U; plane < planes.size(); ++plane) {
@@ -510,6 +628,23 @@ void V4L2BufferQueue::releaseMappings() noexcept
     }
     buffers_.clear();
     state_ = V4L2BufferQueueState::Idle;
+}
+
+void V4L2BufferQueue::closeDmaBufFds() noexcept
+{
+    for (std::size_t buffer_index = 0U;
+         buffer_index < buffers_.size();
+         ++buffer_index) {
+        std::vector<MappedPlane>& planes = buffers_[buffer_index].planes;
+        for (std::size_t plane_index = 0U;
+             plane_index < planes.size();
+             ++plane_index) {
+            if (planes[plane_index].dma_buf_fd >= 0) {
+                static_cast<void>(::close(planes[plane_index].dma_buf_fd));
+                planes[plane_index].dma_buf_fd = -1;
+            }
+        }
+    }
 }
 
 void V4L2BufferQueue::releaseDriverBuffersNoThrow() noexcept

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# 使用 vivid 创建的虚拟 capture nodes 验证 camera_demo 的 probe 和 MMAP 采集。
+# 使用 vivid 创建的虚拟 capture nodes 验证 probe、MMAP 采集和 DMA-BUF 导出。
 #
 # 本脚本不加载或卸载内核模块。先运行：
 #   sudo ./tools/virtual_camera_modules.sh load
@@ -75,8 +75,13 @@ for node in "${vivid_nodes[@]}"; do
             --format YUYV \
             --buffers 4 \
             --frames 100 \
+            --export-dmabuf \
             --timeout-ms 2000 2>&1)"; then
             echo "${capture_output}"
+            if [[ "${capture_output}" != *"DMA-BUF exports:"* ]]; then
+                echo "error: ${node} did not report DMA-BUF exports." >&2
+                continue
+            fi
             if [[ "${capture_output}" != *"Capture complete: captured=100"* ]]; then
                 echo "error: ${node} did not report 100 captured frames." >&2
                 continue
@@ -84,7 +89,7 @@ for node in "${vivid_nodes[@]}"; do
             capture_passed=$((capture_passed + 1))
         else
             echo "${capture_output}" >&2
-            echo "error: MMAP capture failed for ${node}." >&2
+            echo "error: MMAP capture or DMA-BUF export failed for ${node}." >&2
         fi
     else
         echo "${output}" >&2
@@ -103,4 +108,4 @@ if [[ "${capture_passed}" -ne "${passed}" ]]; then
     exit 1
 fi
 
-echo "Virtual V4L2 probe and capture test passed (${passed} nodes)."
+echo "Virtual V4L2 probe, DMA-BUF export and capture test passed (${passed} nodes)."

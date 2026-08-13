@@ -4,8 +4,8 @@ test.log
 
 # 产物
 build/
+build-*/
 
 # 缓存
 .cache
-
 

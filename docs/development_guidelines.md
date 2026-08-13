@@ -222,6 +222,18 @@ memory plane。
 收到 DRM flip-complete 之前，不得把旧 scanout buffer 重新交给 V4L2。相关代码
 必须在状态转换处重复说明这一硬件并发约束。
 
+### 6.4 DMA-BUF fd 所有权
+
+- `VIDIOC_EXPBUF` 成功返回的 fd 归调用进程所有，必须且只能由一个明确对象关闭。
+- 本项目由 `V4L2BufferQueue` 拥有原始导出 fd。`CapturedPlane::dma_buf_fd` 和
+  `dmaBufFd()` 只提供借用值，调用方不得 `close()`。
+- 如果消费者需要比 `V4L2BufferQueue` 活得更久，必须先通过 `dup()` 创建自己的
+  fd，并由消费者关闭副本。
+- DMA-BUF fd 与 mmap 虚拟地址是同一底层 buffer 的两种引用，不代表发生了一次
+  图像数据复制。
+- 销毁 capture pool 时，先停止所有使用者，再关闭导出 fd、`munmap()`，最后执行
+  `VIDIOC_REQBUFS(count=0)`。DRM 导入后还必须先删除 framebuffer、关闭 GEM handle。
+
 ## 7. 错误处理与日志
 
 - 系统调用失败信息必须包含操作名、设备路径、`strerror(errno)` 和 errno 数值。
@@ -290,8 +302,9 @@ rg -- "-std=" build/compile_commands.json
 ./tools/test_virtual_v4l2_probe.sh
 ```
 
-该测试不仅枚举格式，还必须实际完成 MMAP streaming 和固定帧数的 QBUF/DQBUF
-循环；只有 probe 输出正确不能视为 buffer queue 验收通过。
+该测试不仅枚举格式，还必须实际完成 MMAP streaming、每个 memory plane 的
+DMA-BUF 导出，以及固定帧数的 QBUF/DQBUF 循环；只有 probe 输出正确不能视为
+buffer queue 验收通过。
 
 RK3568 交叉构建还需要检查：
 

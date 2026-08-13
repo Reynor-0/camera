@@ -533,5 +533,6 @@ DisplayBackend
 - [DRM userspace API](https://docs.kernel.org/gpu/drm-uapi.html)
 - [DRM/KMS](https://docs.kernel.org/gpu/drm-kms.html)
 
-下一项实际开发工作按
-[V4L2 MMAP 连续采集计划](v4l2_mmap_capture_plan.md)执行。
+V4L2 MMAP 连续采集阶段见
+[V4L2 MMAP 连续采集计划](v4l2_mmap_capture_plan.md)。当前下一项工作按
+[DMA-BUF 导出开发计划](dma_buf_export_plan.md)执行。

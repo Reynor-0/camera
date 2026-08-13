@@ -117,7 +117,9 @@ instance 1: V4L2 multi-planar capture API
 - 至少覆盖一个 single-planar node。
 - 至少覆盖一个 multi-planar node。
 - 每个 vivid node 使用 4 个 MMAP buffers 连续采集 100 帧。
-- `REQBUFS/QUERYBUF/mmap/QBUF/STREAMON/poll/DQBUF/QBUF/STREAMOFF` 全链路成功。
+- 每个 buffer/plane 均通过 `VIDIOC_EXPBUF` 获得 DMA-BUF fd。
+- `REQBUFS/QUERYBUF/mmap/EXPBUF/QBUF/STREAMON/poll/DQBUF/QBUF/STREAMOFF`
+  全链路成功。
 
 也可以手动运行输出中列出的节点：
 
@@ -135,14 +137,20 @@ instance 1: V4L2 multi-planar capture API
   --format NV12 \
   --buffers 4 \
   --frames 1000 \
-  --timeout-ms 2000
+  --timeout-ms 2000 \
+  --export-dmabuf
 ```
 
 成功结束时应看到：
 
 ```text
+DMA-BUF exports:
+  buffer=0 plane=0 fd=4
+  ...
 Capture complete: captured=1000 errors=0 timeouts=0 sequence_gaps=0
 ```
+
+fd 数值只在当前进程中有意义，不要求与示例相同；它不是物理地址。
 
 `errors`、`timeouts` 或 `sequence_gaps` 非零不一定都是程序缺陷，但需要结合逐帧
 flags、虚拟驱动设置和系统负载分析，不能直接忽略。

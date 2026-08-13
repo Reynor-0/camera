@@ -46,6 +46,14 @@ struct CapturedPlane {
 
     /** 有效图像数据相对 mmap 起始地址的偏移，单位为字节。 */
     std::uint32_t data_offset{0U};
+
+    /**
+     * 通过 VIDIOC_EXPBUF 导出的 DMA-BUF fd；未导出时为 -1。
+     *
+     * 该 fd 由 V4L2BufferQueue 拥有，调用方只能借用，不得 close。它与 `data`
+     * 指向同一块底层存储，只是提供给 DRM 等其他内核子系统的共享句柄。
+     */
+    int dma_buf_fd{-1};
 };
 
 /**
@@ -77,13 +85,14 @@ struct CapturedFrame {
  *
  * 本类借用 V4L2Device 的 fd，不拥有也不关闭该 fd。因此 V4L2Device 对象必须比
  * V4L2BufferQueue 活得更久。本类拥有通过 VIDIOC_REQBUFS 获得的内核 buffer 以及
- * QUERYBUF 后建立的 mmap 映射，并在析构时执行 best-effort STREAMOFF 和 munmap。
+ * QUERYBUF 后建立的 mmap 映射，以及通过 VIDIOC_EXPBUF 创建的 DMA-BUF fd；并在
+ * 析构时执行 best-effort STREAMOFF、close 和 munmap。
  *
  * 本类不可复制，当前实现也不提供移动语义。它不是线程安全的；所有方法应由同一
  * 个事件循环线程调用。
  *
- * @note 当前实现覆盖 MMAP buffer 的完整采集生命周期。DMA-BUF 导出仍属于后续
- * 阶段，需按照 docs/v4l2_mmap_capture_plan.md 完成本机和目标板验收后再加入。
+ * @note DMA-BUF 导出不会复制图像数据，也不会改变 capture queue 继续使用
+ * V4L2_MEMORY_MMAP；它只是为同一块存储创建可交给 DRM PRIME 的 fd。
  */
 class V4L2BufferQueue {
 public:
@@ -126,6 +135,43 @@ public:
      * @throws std::runtime_error ioctl/mmap 失败或驱动未返回 buffer 时抛出。
      */
     void requestBuffers(std::uint32_t requested_count);
+
+    /**
+     * @brief 将每个已分配的 V4L2 MMAP memory plane 导出为 DMA-BUF fd。
+     *
+     * 本函数对每个 buffer/plane 调用一次 VIDIOC_EXPBUF，并请求 `O_CLOEXEC` 和
+     * `O_RDWR`。导出的 fd 由当前对象拥有，在映射释放或对象析构时自动关闭。
+     * 导出不会产生像素数据拷贝；mmap 地址和 DMA-BUF fd 是同一存储的两种访问
+     * 方式。为了保持初始化状态明确，本函数只能在 queueAll() 之前调用。
+     *
+     * @throws std::logic_error queue 不处于 BuffersAllocated 状态，或已经完整导出
+     * 时抛出。
+     * @throws std::runtime_error VIDIOC_EXPBUF 失败时抛出；此前在本次调用中已导出
+     * 的 fd 会全部关闭，MMAP buffers 仍然保留，可由调用方决定是否重试。
+     */
+    void exportDmaBuffers();
+
+    /**
+     * @brief 获取指定 V4L2 buffer memory plane 对应的 DMA-BUF fd。
+     *
+     * 返回的是借用句柄，所有权仍属于 V4L2BufferQueue。调用方不得 close；若需要
+     * 跨越 queue 生命周期持有，应先使用 `dup()` 创建自己的 fd。
+     *
+     * @param buffer_index 驱动 buffer pool 中的 buffer 下标。
+     * @param plane_index 当前 buffer 中的 memory plane 下标。
+     * @return 可传给 DRM PRIME importer 的借用 DMA-BUF fd。
+     * @throws std::out_of_range buffer 或 plane 下标越界时抛出。
+     * @throws std::logic_error 对应 plane 尚未成功导出时抛出。
+     */
+    int dmaBufFd(std::uint32_t buffer_index,
+                 std::uint32_t plane_index) const;
+
+    /**
+     * @brief 判断当前所有 buffer/plane 是否都已具有 DMA-BUF fd。
+     * @return 每个已分配 memory plane 都完成导出时返回 true；Idle 或部分导出时
+     * 返回 false。
+     */
+    bool dmaBuffersExported() const noexcept;
 
     /**
      * @brief 将当前 pool 中所有空 buffer 排入 capture queue。
@@ -230,6 +276,9 @@ private:
 
         /** mmap 区域长度，单位为字节。 */
         std::size_t length{0U};
+
+        /** VIDIOC_EXPBUF 返回的拥有型 fd；尚未导出时为 -1。 */
+        int dma_buf_fd{-1};
     };
 
     /** @brief 保存一个 V4L2 buffer 的全部 memory plane 和应用侧所有权状态。 */
@@ -255,7 +304,12 @@ private:
     void stopNoThrow() noexcept;
 
     /**
-     * @brief munmap 所有成功建立的映射并清空本地 slot 列表。
+     * @brief 关闭全部由 VIDIOC_EXPBUF 返回的 fd，并将字段恢复为 -1。
+     */
+    void closeDmaBufFds() noexcept;
+
+    /**
+     * @brief 先关闭 DMA-BUF fd，再 munmap 所有映射并清空本地 slot 列表。
      */
     void releaseMappings() noexcept;
 

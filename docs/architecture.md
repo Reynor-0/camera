@@ -543,5 +543,6 @@ DisplayBackend
 - [DRM/KMS](https://docs.kernel.org/gpu/drm-kms.html)
 
 V4L2 MMAP 连续采集阶段见
-[V4L2 MMAP 连续采集计划](v4l2_mmap_capture_plan.md)。当前下一项工作按
-[DMA-BUF 导出开发计划](dma_buf_export_plan.md)执行。
+[V4L2 MMAP 连续采集计划](v4l2_mmap_capture_plan.md)，DMA-BUF 导出阶段见
+[DMA-BUF 导出开发计划](dma_buf_export_plan.md)。当前已完成的 DRM 只读探测阶段见
+[DRM/KMS 资源探测](drm_probe.md)。

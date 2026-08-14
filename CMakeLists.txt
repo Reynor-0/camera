@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(camera_demo VERSION 0.3.0 LANGUAGES CXX)
+project(camera_demo VERSION 0.4.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,6 +11,11 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
 option(CAMERA_DEMO_WARNINGS_AS_ERRORS
        "Treat compiler warnings as errors" OFF)
+
+option(CAMERA_DEMO_BUILD_DRM_PROBE
+       "Build the read-only DRM/KMS resource probe when libdrm is available" ON)
+option(CAMERA_DEMO_REQUIRE_DRM_PROBE
+       "Fail configuration when drm_probe dependencies are unavailable" OFF)
 
 add_executable(camera_demo
     src/main.cpp
@@ -49,6 +54,54 @@ if(CAMERA_DEMO_TARGET_RK3568_AARCH64)
     target_compile_definitions(camera_demo PRIVATE
         CAMERA_DEMO_TARGET_RK3568_AARCH64=1
     )
+endif()
+
+if(CAMERA_DEMO_BUILD_DRM_PROBE)
+    # xf86drm.h 位于普通 include 目录，而它引用的 drm.h 通常位于 include/libdrm。
+    # 分开查找两者，避免宿主机和交叉 sysroot 的头文件被意外混用。
+    find_path(LIBDRM_XF86_INCLUDE_DIR NAMES xf86drm.h)
+    find_path(LIBDRM_DRM_INCLUDE_DIR NAMES drm.h PATH_SUFFIXES libdrm)
+    find_library(LIBDRM_LIBRARY NAMES drm)
+
+    if(LIBDRM_XF86_INCLUDE_DIR AND LIBDRM_DRM_INCLUDE_DIR AND LIBDRM_LIBRARY)
+        add_executable(drm_probe
+            src/drm_device.cpp
+            src/drm_test_main.cpp
+        )
+
+        target_include_directories(drm_probe PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/inc
+            ${LIBDRM_XF86_INCLUDE_DIR}
+            ${LIBDRM_DRM_INCLUDE_DIR}
+        )
+        target_link_libraries(drm_probe PRIVATE ${LIBDRM_LIBRARY})
+        target_compile_features(drm_probe PRIVATE cxx_std_11)
+        target_compile_options(drm_probe PRIVATE
+            -Wall
+            -Wextra
+            -Wpedantic
+        )
+        target_compile_definitions(drm_probe PRIVATE
+            CAMERA_DEMO_VERSION="${PROJECT_VERSION}"
+        )
+
+        if(CAMERA_DEMO_WARNINGS_AS_ERRORS)
+            target_compile_options(drm_probe PRIVATE -Werror)
+        endif()
+        if(CAMERA_DEMO_TARGET_RK3568_AARCH64)
+            target_compile_definitions(drm_probe PRIVATE
+                CAMERA_DEMO_TARGET_RK3568_AARCH64=1
+            )
+        endif()
+
+        install(TARGETS drm_probe RUNTIME DESTINATION bin)
+    elseif(CAMERA_DEMO_REQUIRE_DRM_PROBE)
+        message(FATAL_ERROR
+            "drm_probe requires xf86drm.h, libdrm/drm.h and libdrm")
+    else()
+        message(WARNING
+            "libdrm development files were not found; drm_probe is disabled")
+    endif()
 endif()
 
 # `cmake --install` 会把程序放入 staging_dir/bin，便于之后统一复制到开发板。

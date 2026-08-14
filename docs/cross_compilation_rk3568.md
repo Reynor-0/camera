@@ -136,17 +136,27 @@ ELF header 的 Machine 必须是 `AArch64`。动态依赖中不应出现开发�
 
 ## 6. 部署到开发板
 
-示例使用 `scp`，实际 IP 和目录按目标板环境调整：
+本项目规定所有传输到开发板的可执行文件统一放在 `/home/reynor`，不得部署到
+`/tmp`、`/usr/local/bin` 或其他目录。交叉构建完成后，在能够连接开发板的
+WSL 中执行：
 
 ```bash
-scp build-rk3568/stage/bin/camera_demo root@board-ip:/usr/local/bin/
+./tools/deploy_rk3568.sh
 ```
 
-如果不希望修改板端系统目录，可部署到临时目录：
+脚本使用 ADB 部署当前项目的 `camera_demo` 和 `drm_probe`，并设置
+`0755` 权限。如果 adb 不在非交互 shell 的 PATH 中，可以显式指定：
 
 ```bash
-scp build-rk3568/stage/bin/camera_demo root@board-ip:/tmp/
-ssh root@board-ip /tmp/camera_demo /dev/video0
+ADB=/home/reynor/tools/platform-tools/adb ./tools/deploy_rk3568.sh
+```
+
+手动部署时也必须使用相同目录：
+
+```bash
+adb push build-rk3568/stage/bin/camera_demo /home/reynor/camera_demo
+adb push build-rk3568/stage/bin/drm_probe /home/reynor/drm_probe
+adb shell chmod 0755 /home/reynor/camera_demo /home/reynor/drm_probe
 ```
 
 运行前检查权限和设备：
@@ -198,15 +208,9 @@ pkg-config 文件，并在板端安装 ABI 兼容的运行库。
 
 ## 9. 当前环境验证状态
 
-当前代码工作区主机为 x86_64，未发现 `aarch64-linux-gnu-g++` 或 Rockchip SDK
-交叉编译器。因此当前只能验证：
-
-- 本机 ISO C++11 编译成功。
-- toolchain、构建脚本和 CMake 参数组织完成。
-- 缺少交叉编译器时脚本能够立即报告明确错误。
-
-取得板卡 SDK 或安装 AArch64 工具链后，必须执行一次真实交叉构建，并在 RK3568
-板端验证 ELF、动态依赖和 V4L2 ioctl。
+远程 WSL 已安装 ATK Buildroot GCC 10.3.0 工具链，sysroot 与开发板 Buildroot
+运行环境匹配。`camera_demo` 和 `drm_probe` 均已完成 AArch64 交叉构建；
+V4L2 MMAP/DMA-BUF 导出和 DRM 只读资源探测已在 RK3568 实板验证。
 
 ## 10. 参考资料
 

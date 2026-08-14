@@ -67,6 +67,7 @@ cmake_args=(
     -DRK3568_CROSS_COMPILE="${cross_prefix}"
     -DRK3568_CPU_FLAGS="${cpu_flags}"
     -DCMAKE_INSTALL_PREFIX=/usr/local
+    -DCAMERA_DEMO_REQUIRE_DRM_PROBE=ON
 )
 
 if [[ -n "${sysroot}" ]]; then
@@ -86,6 +87,12 @@ if [[ ! -f "${binary}" ]]; then
     exit 1
 fi
 
+drm_probe_binary="${stage_dir}/bin/drm_probe"
+if [[ ! -f "${drm_probe_binary}" ]]; then
+    echo "error: expected DRM probe was not installed: ${drm_probe_binary}" >&2
+    exit 1
+fi
+
 # readelf 来自交叉工具链，不依赖宿主机 file 命令对架构名称的输出格式。
 machine="$("${readelf_tool}" -h "${binary}" | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')"
 if [[ "${machine}" != *AArch64* ]]; then
@@ -93,6 +100,15 @@ if [[ "${machine}" != *AArch64* ]]; then
     exit 1
 fi
 
+drm_probe_machine="$("${readelf_tool}" -h "${drm_probe_binary}" |
+    sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')"
+if [[ "${drm_probe_machine}" != *AArch64* ]]; then
+    echo "error: drm_probe is not an AArch64 ELF: ${drm_probe_machine}" >&2
+    exit 1
+fi
+
 echo "RK3568 build completed."
 echo "  ELF machine: ${machine}"
 echo "  Binary:      ${binary}"
+echo "  DRM probe:   ${drm_probe_binary}"
+echo "  Deploy with: ./tools/deploy_rk3568.sh"

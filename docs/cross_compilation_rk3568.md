@@ -210,7 +210,8 @@ pkg-config 文件，并在板端安装 ABI 兼容的运行库。
 
 远程 WSL 已安装 ATK Buildroot GCC 10.3.0 工具链，sysroot 与开发板 Buildroot
 运行环境匹配。`camera_demo` 和 `drm_probe` 均已完成 AArch64 交叉构建；
-V4L2 MMAP/DMA-BUF 导出和 DRM 只读资源探测已在 RK3568 实板验证。
+V4L2 MMAP/DMA-BUF 导出、DRM 资源探测和未绑定 Dumb Buffer 生命周期已在 RK3568
+实板验证。
 
 ## 10. 参考资料
 

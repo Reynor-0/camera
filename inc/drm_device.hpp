@@ -96,6 +96,16 @@ public:
     DrmProbeResult probe() const;
 
     /**
+     * @brief 获取当前对象拥有的 DRM fd。
+     *
+     * 返回值仅供生命周期更短的 DRM 资源对象借用，调用方不得 close。所有借用该
+     * fd 的 framebuffer 等对象必须先于 DrmDevice 析构。
+     *
+     * @return 已打开的 DRM primary node fd。
+     */
+    int fd() const noexcept;
+
+    /**
      * @brief 获取当前 DRM 设备路径。
      * @return 构造时保存的路径引用，有效期与当前对象一致。
      */

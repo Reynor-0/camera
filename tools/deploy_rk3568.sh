@@ -46,4 +46,13 @@ for binary_name in "${binaries[@]}"; do
     echo "Deployed: ${board_binary}"
 done
 
+# 板端独占显示涉及停止和恢复桌面服务。把受控运行脚本部署到同一目录，避免用户
+# 从 /tmp 或其他位置调用不同版本的脚本和可执行文件。
+board_test_script="${board_directory}/run_drm_color_bars_rk3568.sh"
+"${adb_command}" push \
+    "${project_dir}/tools/run_drm_color_bars_rk3568.sh" \
+    "${board_test_script}"
+"${adb_command}" shell "chmod 0755 ${board_test_script}"
+echo "Deployed: ${board_test_script}"
+
 echo "RK3568 deployment completed."

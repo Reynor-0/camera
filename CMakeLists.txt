@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(camera_demo VERSION 0.4.0 LANGUAGES CXX)
+project(camera_demo VERSION 0.6.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -13,7 +13,7 @@ option(CAMERA_DEMO_WARNINGS_AS_ERRORS
        "Treat compiler warnings as errors" OFF)
 
 option(CAMERA_DEMO_BUILD_DRM_PROBE
-       "Build the read-only DRM/KMS resource probe when libdrm is available" ON)
+       "Build the DRM/KMS resource and dumb-buffer probe when libdrm is available" ON)
 option(CAMERA_DEMO_REQUIRE_DRM_PROBE
        "Fail configuration when drm_probe dependencies are unavailable" OFF)
 
@@ -66,6 +66,7 @@ if(CAMERA_DEMO_BUILD_DRM_PROBE)
     if(LIBDRM_XF86_INCLUDE_DIR AND LIBDRM_DRM_INCLUDE_DIR AND LIBDRM_LIBRARY)
         add_executable(drm_probe
             src/drm_device.cpp
+            src/drm_display.cpp
             src/drm_test_main.cpp
         )
 

@@ -371,3 +371,8 @@ const std::string& DrmDevice::path() const noexcept
 {
     return device_path_;
 }
+
+int DrmDevice::fd() const noexcept
+{
+    return fd_;
+}

@@ -67,6 +67,8 @@ cmake_args=(
     -DRK3568_CROSS_COMPILE="${cross_prefix}"
     -DRK3568_CPU_FLAGS="${cpu_flags}"
     -DCMAKE_INSTALL_PREFIX=/usr/local
+    # 板端正式产物不允许带着编译告警进入部署阶段。
+    -DCAMERA_DEMO_WARNINGS_AS_ERRORS=ON
     -DCAMERA_DEMO_REQUIRE_DRM_PROBE=ON
 )
 

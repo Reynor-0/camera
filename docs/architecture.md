@@ -393,12 +393,12 @@ modetest -p
 
 先用 DRM dumb buffer 显示 RGB 色条，实现：
 
-- connector、CRTC 和 plane 自动选择。
-- Atomic `TEST_ONLY`。
-- 首次 modeset。
+- [x] connector、CRTC 自动选择。
+- [x] 单 framebuffer 首次 legacy modeset。
+- [ ] plane 自动选择和 Atomic `TEST_ONLY`。
 - 双 framebuffer page flip。
 - flip event 处理。
-- 退出时恢复显示状态。
+- [x] 退出时关闭测试 CRTC，由板端脚本恢复 Weston。
 
 验收标准：持续翻页无撕裂，不硬编码 DRM object ID，并能处理无连接显示器等错误。
 
@@ -544,5 +544,5 @@ DisplayBackend
 
 V4L2 MMAP 连续采集阶段见
 [V4L2 MMAP 连续采集计划](v4l2_mmap_capture_plan.md)，DMA-BUF 导出阶段见
-[DMA-BUF 导出开发计划](dma_buf_export_plan.md)。当前已完成的 DRM 只读探测阶段见
-[DRM/KMS 资源探测](drm_probe.md)。
+[DMA-BUF 导出开发计划](dma_buf_export_plan.md)。当前已完成的 DRM 资源探测与未绑定
+Dumb Buffer 生命周期验证见 [DRM/KMS 资源探测](drm_probe.md)。

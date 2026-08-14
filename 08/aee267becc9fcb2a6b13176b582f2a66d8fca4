@@ -1,0 +1,41 @@
+docs/architecture.md
+  s_fde35fba74955f::t_bc63783de6642c 546-548
+docs/cross_compilation_rk3568.md
+  s_fde35fba74955f::t_a6d8b172577718 139-141,144,147-148,151-159,211-213
+docs/development_guidelines.md
+  s_fde35fba74955f::t_a6d8b172577718 266-277
+inc/drm_device.hpp
+  s_fde35fba74955f::t_dc7403cd97c6b0 1-110
+src/drm_test_main.cpp
+  s_fde35fba74955f::t_dc7403cd97c6b0 1-115
+tools/cross_build_rk3568.sh
+  s_fde35fba74955f::t_dd974fbef43c45 70,90-95,103-109,113
+  s_fde35fba74955f::t_a6d8b172577718 114
+src/drm_device.cpp
+  s_fde35fba74955f::t_dc7403cd97c6b0 1-220,270-275,277-373
+  s_fde35fba74955f::t_c51e5f65eb9c6e 221-269,276
+CMakeLists.txt
+  s_fde35fba74955f::t_6debc74c1dc81d 3
+  s_fde35fba74955f::t_dd974fbef43c45 15-19,59-104
+docs/drm_probe.md
+  s_fde35fba74955f::t_a6d8b172577718 38
+  s_fde35fba74955f::t_bc63783de6642c 1-37,39-66
+tools/deploy_rk3568.sh
+  s_fde35fba74955f::t_a6d8b172577718 1-49
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.8",
+  "base_commit_sha": "08aee267becc9fcb2a6b13176b582f2a66d8fca4",
+  "prompts": {},
+  "sessions": {
+    "s_fde35fba74955f": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ff461-b97b-7f81-9faf-854f760dd629",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Reynor Zhang <erikjhagins3@gmail.com>"
+    }
+  }
+}

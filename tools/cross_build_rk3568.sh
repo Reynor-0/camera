@@ -2,9 +2,9 @@
 
 # 为 64 位 RK3568 Linux 用户态配置、编译并安装 camera_demo。
 #
-# 必需/可选环境变量：
-#   RK3568_CROSS_COMPILE  交叉工具前缀，默认 aarch64-linux-gnu-
-#   RK3568_SYSROOT        目标 rootfs/sysroot；当前 probe 可省略，DRM 阶段必须提供
+# 可选环境变量：
+#   RK3568_CROSS_COMPILE  交叉工具前缀；未设置时优先使用 ATK Buildroot 工具链
+#   RK3568_SYSROOT        目标 rootfs/sysroot；未设置时从选中的编译器自动查询
 #   RK3568_BUILD_DIR      构建目录，默认 <project>/build-rk3568
 #   RK3568_STAGE_DIR      安装暂存目录，默认 <build-dir>/stage
 #   RK3568_CPU_FLAGS      可选，例如 -mcpu=cortex-a55
@@ -14,7 +14,17 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(cd "${script_dir}/.." && pwd)"
 
-cross_prefix="${RK3568_CROSS_COMPILE:-aarch64-linux-gnu-}"
+atk_cross_prefix="/opt/atk-dlrk356x-toolchain/bin/aarch64-buildroot-linux-gnu-"
+if [[ -n "${RK3568_CROSS_COMPILE:-}" ]]; then
+    cross_prefix="${RK3568_CROSS_COMPILE}"
+elif command -v aarch64-buildroot-linux-gnu-g++ >/dev/null 2>&1; then
+    cross_prefix="aarch64-buildroot-linux-gnu-"
+elif [[ -x "${atk_cross_prefix}g++" ]]; then
+    cross_prefix="${atk_cross_prefix}"
+else
+    # 保留通用 Debian/Ubuntu AArch64 工具链作为最后的兼容回退。
+    cross_prefix="aarch64-linux-gnu-"
+fi
 build_dir="${RK3568_BUILD_DIR:-${project_dir}/build-rk3568}"
 stage_dir="${RK3568_STAGE_DIR:-${build_dir}/stage}"
 sysroot="${RK3568_SYSROOT:-}"
@@ -33,6 +43,15 @@ if ! command -v "${readelf_tool}" >/dev/null 2>&1; then
     echo "error: RK3568 ELF inspection tool was not found: ${readelf_tool}" >&2
     echo "the compiler prefix must identify a complete AArch64 toolchain." >&2
     exit 1
+fi
+
+# Buildroot 的 toolchain wrapper 会根据自己的安装位置返回已经重定位后的 sysroot。
+# 显式环境变量仍具有最高优先级，便于临时使用目标板 rootfs 的另一份快照。
+if [[ -z "${sysroot}" ]]; then
+    detected_sysroot="$("${cxx_compiler}" -print-sysroot 2>/dev/null || true)"
+    if [[ -n "${detected_sysroot}" && -d "${detected_sysroot}" ]]; then
+        sysroot="${detected_sysroot}"
+    fi
 fi
 
 if [[ -n "${sysroot}" && ! -d "${sysroot}" ]]; then

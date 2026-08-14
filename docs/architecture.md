@@ -1,21 +1,30 @@
-# IMX415 V4L2 到 DRM/KMS 实时显示设计
+# RK3568 V4L2 到 DRM/KMS 实时显示设计
 
 ## 1. 文档目的
 
-本文描述 IMX415 经 D-PHY 和 ISP 处理后，通过 V4L2 capture node（例如
+本文描述外部 Bayer Sensor 经 D-PHY 和硬件 ISP 处理后，通过 V4L2 capture node（例如
 `/dev/video0`）输出视频帧，并在用户态使用 DMA-BUF 和 DRM/KMS 将画面实时显示
-到屏幕上的整体设计。
+到屏幕上的整体设计。当前 media entity 使用 IMX415 名称，但设备树 compatible 为
+IMX335，精确物理料号应以原理图、BOM 或芯片丝印为准。
 
-第一阶段的目标是打通一条低延迟、无 CPU 图像拷贝的直接扫描输出链路：
+当前开发板的摄像头为 1920x1080 横屏输出，DSI panel 为 1080x1920 竖屏，实际
+落地需要 RGA 完成旋转。经过板端 media graph、RGA、DRM plane 和厂商相机程序
+验证后的具体方案，见
+[RK3568 摄像头到 DSI 屏幕：硬件拓扑、软件模型与实现方案](rk3568_camera_to_dsi_pipeline.md)。
+本文保留通用 direct-scanout 架构和早期设计背景；涉及当前板卡的实现优先级、颜色
+转换、双 buffer pool 和 Weston 退出方案时，以该详细文档为准。
+
+第一阶段的目标是打通一条低延迟、无 CPU 图像拷贝的专用显示链路：
 
 ```text
-IMX415 -> D-PHY -> ISP -> V4L2 -> DMA-BUF -> DRM PRIME -> KMS plane -> Screen
+Sensor -> CSI-2/D-PHY -> ISP -> V4L2/DDR -> RGA -> DRM/KMS/VOP -> DSI/D-PHY -> Panel
 ```
 
 D-PHY、sensor 和 ISP 的驱动配置属于内核态及 media pipeline 范畴。用户态程序
 以可用的 V4L2 capture node 为输入，并假定 ISP 已经能够输出 NV12、YUYV 等处理
 后的图像格式。如果 video node 输出的仍然是 RAW Bayer 数据，则不能直接进入本文
-描述的 KMS direct-scanout 路径，需要先完成 ISP demosaic 或 GPU 图像处理。
+描述的 KMS 显示路径，需要先由 ISP 完成 demosaic；RGA 的普通 YUV/RGB 转换不能
+替代 Bayer ISP。
 
 ## 2. 当前项目评估
 

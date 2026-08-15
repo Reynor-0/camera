@@ -5,6 +5,7 @@
 #include <time.h>
 
 #include <cerrno>
+#include <chrono>
 #include <csignal>
 #include <cstring>
 #include <cstdlib>
@@ -100,6 +101,12 @@ struct Options {
 
     /** 色条保持时间，单位为秒；仅 show_color_bars 为 true 时有效。 */
     std::uint32_t show_duration_seconds{0U};
+
+    /** 是否以两个 framebuffer 执行带完成事件的动态翻页测试。 */
+    bool page_flip_color_bars{false};
+
+    /** 两次 page flip 的目标间隔，单位为毫秒。 */
+    std::uint32_t page_flip_interval_ms{500U};
 };
 
 /**
@@ -117,6 +124,9 @@ void printUsage(const char* program, std::ostream& output)
            << "  " << program
            << " --show-color-bars <seconds> --confirm-desktop-stopped\n"
            << "      [drm-device]\n"
+           << "  " << program
+           << " --page-flip-color-bars <seconds> --interval-ms <milliseconds>\n"
+           << "      --confirm-desktop-stopped [drm-device]\n"
            << "  " << program << " -h | --help\n"
            << "  " << program << " --version\n\n"
            << "Arguments:\n"
@@ -126,12 +136,50 @@ void printUsage(const char* program, std::ostream& output)
            << "                      unbound mode-sized XRGB8888 framebuffer\n"
            << "  --show-color-bars   obtain DRM master and display the same\n"
            << "                      framebuffer for 1 to 300 seconds\n"
+           << "  --page-flip-color-bars\n"
+           << "                      alternate two XRGB8888 framebuffers using\n"
+           << "                      page-flip events for 1 to 300 seconds\n"
+           << "  --interval-ms       50 to 5000 ms between requested flips\n"
            << "  --confirm-desktop-stopped\n"
            << "                      required acknowledgement that Weston and\n"
            << "                      its clients have already been stopped\n\n"
            << "The default command is read-only. Dumb-buffer test mode creates\n"
            << "temporary unbound resources. Color-bar mode changes the CRTC and\n"
            << "requires Weston and other DRM masters to be stopped first.\n";
+}
+
+/**
+ * @brief 解析动态翻页间隔。
+ * @param text 只允许包含十进制数字的参数。
+ * @return 50 到 5000 范围内的毫秒数。
+ * @throws std::invalid_argument 文本无效或数值越界时抛出。
+ */
+std::uint32_t parseFlipIntervalMilliseconds(const std::string& text)
+{
+    if (text.empty()) {
+        throw std::invalid_argument("page-flip interval must not be empty");
+    }
+    for (std::size_t index = 0U; index < text.size(); ++index) {
+        if (text[index] < '0' || text[index] > '9') {
+            throw std::invalid_argument(
+                "page-flip interval must contain decimal digits only");
+        }
+    }
+
+    std::size_t parsed_characters = 0U;
+    unsigned long milliseconds = 0UL;
+    try {
+        milliseconds = std::stoul(text, &parsed_characters, 10);
+    } catch (const std::exception&) {
+        throw std::invalid_argument(
+            "page-flip interval must be between 50 and 5000 ms");
+    }
+    if (parsed_characters != text.size() || milliseconds < 50UL ||
+        milliseconds > 5000UL) {
+        throw std::invalid_argument(
+            "page-flip interval must be between 50 and 5000 ms");
+    }
+    return static_cast<std::uint32_t>(milliseconds);
 }
 
 /**
@@ -209,6 +257,33 @@ Options parseOptions(int argc, char* argv[])
         options.show_duration_seconds = parseDurationSeconds(argv[2]);
         if (argc == 5) {
             options.device_path = argv[4];
+        }
+        return options;
+    }
+
+    if (first == "--page-flip-color-bars") {
+        if (argc != 6 && argc != 7) {
+            throw std::invalid_argument(
+                "--page-flip-color-bars requires seconds, --interval-ms, "
+                "milliseconds and --confirm-desktop-stopped");
+        }
+        if (std::string(argv[3]) != "--interval-ms" ||
+            std::string(argv[5]) != "--confirm-desktop-stopped") {
+            throw std::invalid_argument(
+                "invalid --page-flip-color-bars option order");
+        }
+        options.page_flip_color_bars = true;
+        options.show_duration_seconds = parseDurationSeconds(argv[2]);
+        options.page_flip_interval_ms =
+            parseFlipIntervalMilliseconds(argv[4]);
+        const std::uint64_t duration_ms =
+            static_cast<std::uint64_t>(options.show_duration_seconds) * 1000U;
+        if (options.page_flip_interval_ms > duration_ms) {
+            throw std::invalid_argument(
+                "page-flip interval must not exceed display duration");
+        }
+        if (argc == 7) {
+            options.device_path = argv[6];
         }
         return options;
     }
@@ -322,6 +397,36 @@ void waitForDisplay(std::uint32_t duration_seconds)
 }
 
 /**
+ * @brief 可被 SIGINT/SIGTERM 提前结束的毫秒级等待。
+ * @param duration_ms 最长等待时长，单位为毫秒。
+ */
+void waitForDisplayMilliseconds(std::uint32_t duration_ms)
+{
+    std::uint32_t remaining_ms = duration_ms;
+    while (remaining_ms > 0U && g_stop_requested == 0) {
+        const std::uint32_t chunk_ms =
+            remaining_ms > 50U ? 50U : remaining_ms;
+        timespec remaining{};
+        remaining.tv_sec = 0;
+        remaining.tv_nsec =
+            static_cast<long>(chunk_ms) * 1000000L;
+        while (::nanosleep(&remaining, &remaining) != 0) {
+            if (errno == EINTR) {
+                if (g_stop_requested != 0) {
+                    return;
+                }
+                continue;
+            }
+            const int error = errno;
+            throw std::runtime_error(
+                "nanosleep failed: " + std::string(std::strerror(error)) +
+                " (errno=" + std::to_string(error) + ")");
+        }
+        remaining_ms -= chunk_ms;
+    }
+}
+
+/**
  * @brief 取得 DRM master，把色条 framebuffer 显示到目标 CRTC 后安全退出。
  * @param device 已打开且生命周期覆盖本函数的 DRM 设备。
  * @param result probe() 选出的 connector、CRTC 和 mode。
@@ -371,6 +476,102 @@ void runColorBarDisplay(const DrmDevice& device,
     }
 }
 
+/**
+ * @brief 使用两个 framebuffer 和 flip-complete 事件验证动态显示所有权。
+ * @param device 已打开且生命周期覆盖本函数的 DRM 设备。
+ * @param result probe() 选出的 connector、CRTC 和 mode。
+ * @param duration_seconds 测试最长持续时间，单位为秒。
+ * @param interval_ms 两次翻页请求之间的目标间隔，单位为毫秒。
+ */
+void runPageFlipColorBars(const DrmDevice& device,
+                          const DrmProbeResult& result,
+                          std::uint32_t duration_seconds,
+                          std::uint32_t interval_ms)
+{
+    if (!result.dumb_buffer_supported) {
+        throw std::runtime_error(
+            "DRM driver does not support dumb buffers");
+    }
+
+    // 构造顺序确保 display 最先析构和关闭 CRTC，随后才删除两个 framebuffer。
+    DrmDumbFramebuffer framebuffer_a(device.fd(),
+                                      result.mode.width,
+                                      result.mode.height);
+    DrmDumbFramebuffer framebuffer_b(device.fd(),
+                                      result.mode.width,
+                                      result.mode.height);
+    framebuffer_a.fillColorBars(false);
+    framebuffer_b.fillColorBars(true);
+    DrmCrtcDisplay display(device.fd(),
+                           result.connector_id,
+                           result.crtc_id,
+                           result.mode.name,
+                           result.mode.width,
+                           result.mode.height,
+                           true);
+
+    g_stop_requested = 0;
+    SignalHandlerGuard signal_handlers;
+    display.show(framebuffer_a.framebufferId());
+
+    std::cout << "DRM page-flip color bars are now active:\n"
+              << "  Framebuffer A: " << framebuffer_a.framebufferId()
+              << " checksum=0x" << std::hex << framebuffer_a.checksum()
+              << std::dec << '\n'
+              << "  Framebuffer B: " << framebuffer_b.framebufferId()
+              << " checksum=0x" << std::hex << framebuffer_b.checksum()
+              << std::dec << '\n'
+              << "  CRTC ID: " << result.crtc_id << '\n'
+              << "  Connector ID: " << result.connector_id << '\n'
+              << "  Interval: " << interval_ms << " ms\n"
+              << "  Duration: " << duration_seconds << " seconds maximum\n"
+              << "  Press Ctrl-C to stop early.\n";
+
+    const std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::now() +
+        std::chrono::seconds(duration_seconds);
+    bool show_framebuffer_b = true;
+    while (g_stop_requested == 0 &&
+           std::chrono::steady_clock::now() < deadline) {
+        const std::chrono::steady_clock::time_point now =
+            std::chrono::steady_clock::now();
+        const std::chrono::milliseconds remaining =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - now);
+        if (remaining.count() <= 0) {
+            break;
+        }
+        const std::uint32_t wait_ms =
+            remaining.count() < static_cast<long long>(interval_ms)
+                ? static_cast<std::uint32_t>(remaining.count())
+                : interval_ms;
+        waitForDisplayMilliseconds(wait_ms);
+        if (g_stop_requested != 0 ||
+            std::chrono::steady_clock::now() >= deadline) {
+            break;
+        }
+
+        const std::uint32_t next_framebuffer_id =
+            show_framebuffer_b ? framebuffer_b.framebufferId()
+                               : framebuffer_a.framebufferId();
+        static_cast<void>(display.pageFlipAndWait(next_framebuffer_id, 2000));
+        show_framebuffer_b = !show_framebuffer_b;
+    }
+
+    const std::uint64_t completed_flips = display.completedFlipCount();
+    const DrmCrtcRestoreResult restore_result = display.restore();
+    framebuffer_b.release();
+    framebuffer_a.release();
+
+    std::cout << "Page-flip test complete:\n"
+              << "  Completed flips: " << completed_flips << '\n';
+    if (restore_result == DrmCrtcRestoreResult::kCrtcDisabled) {
+        std::cout << "  Cleanup: CRTC safely disabled; restart Weston\n";
+    } else {
+        std::cout << "  Cleanup: no CRTC change was required\n";
+    }
+}
+
 }  // namespace
 
 int main(int argc, char* argv[])
@@ -398,6 +599,11 @@ int main(int argc, char* argv[])
             runColorBarDisplay(device,
                                result,
                                options.show_duration_seconds);
+        } else if (options.page_flip_color_bars) {
+            runPageFlipColorBars(device,
+                                 result,
+                                 options.show_duration_seconds,
+                                 options.page_flip_interval_ms);
         }
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {

@@ -1,8 +1,8 @@
-# DRM/KMS 资源探测、Dumb Buffer 与单帧 Modeset
+# DRM/KMS 资源探测、Dumb Buffer、Modeset 与动态翻页
 
 ## 1. 阶段目标与边界
 
-`drm_probe` 目前提供三个彼此独立的运行模式：
+`drm_probe` 目前提供四个彼此独立的运行模式：
 
 - 默认模式只查询 DRM driver、dumb-buffer capability、connector、preferred mode、
   encoder 和 CRTC。
@@ -10,8 +10,11 @@
   XRGB8888 dumb framebuffer。
 - `--show-color-bars` 在桌面程序已停止的前提下取得 DRM master，把 XRGB8888 色条
   framebuffer 绑定到 CRTC，保持指定时间后关闭 CRTC 并释放资源。
+- `--page-flip-color-bars` 创建两个方向相反的 XRGB8888 色条 framebuffer，首次
+  modeset 后使用 `drmModePageFlip` 交替显示，并通过 flip-complete event 确认旧
+  framebuffer 已可回收。
 
-前两种模式可以在 Weston 运行期间使用。第三种模式会真正改变显示状态，必须通过
+前两种模式可以在 Weston 运行期间使用。后两种模式会真正改变显示状态，必须通过
 板端受控脚本停止 Weston、systemui 和厂商 camera 后运行。
 
 ## 2. 代码组织
@@ -23,6 +26,7 @@ inc/drm_display.hpp     Dumb framebuffer 与独占 CRTC 会话接口
 src/drm_display.cpp     buffer 生命周期、legacy modeset 和逆序清理
 src/drm_test_main.cpp   命令行解析、结果输出与小阶段测试流程
 tools/run_drm_color_bars_rk3568.sh  板端桌面停止、测试和恢复编排
+tools/run_drm_page_flip_rk3568.sh   板端动态翻页测试和恢复编排
 ```
 
 connector、encoder、CRTC 和 framebuffer object ID 都由内核动态分配或由程序自动
@@ -82,7 +86,7 @@ drmModeRmFB -> munmap -> DRM_IOCTL_MODE_DESTROY_DUMB
 后续步骤继续执行；`release()` 会在全部清理尝试完成后报告第一个错误。析构函数只
 作为不抛异常的兜底。
 
-## 5. 单帧 Modeset 流程
+## 5. Modeset 与动态翻页流程
 
 ```text
 停止 systemui/camera/Weston
@@ -104,10 +108,40 @@ drmModeSetCrtc(framebuffer=0) -> RmFB -> munmap -> DESTROY_DUMB
 释放 master，按需重启 Weston/systemui
 ```
 
-本阶段使用 legacy `drmModeSetCrtc`，尚未实现 atomic commit、page flip 或 DRM event。
-静态 framebuffer 在保持期间不发生交换，因此不需要 event loop。
+静态色条模式在保持期间不交换 framebuffer，因此不需要 event loop。动态模式继续
+使用 legacy `drmModeSetCrtc` 完成首次 modeset，后续通过 legacy page flip 和事件
+循环切换；本阶段仍未实现 atomic commit。
 
-### 5.1 为什么还需要显式确认桌面已停止
+### 5.1 双缓冲动态翻页
+
+```text
+创建 framebuffer A/B 并写入相反顺序的色条
+        |
+        v
+drmModeSetCrtc(A)               A = SCANNING，B = FREE
+        |
+        v
+drmModePageFlip(B, EVENT)       A = SCANNING，B = PENDING
+        |
+        v
+poll(/dev/dri/card0)
+        |
+        v
+drmHandleEvent -> flip complete A = FREE，B = SCANNING
+        |
+        v
+下一次 drmModePageFlip(A, EVENT)，循环
+```
+
+程序同一时间只允许一个 page flip 在途。`drmModePageFlip()` 成功只表示请求已进入
+内核队列，不能立即认为旧 framebuffer 可复用；必须在 `drmHandleEvent()` 调用的
+page-flip handler 中提交所有权切换。每次事件最长等待 2000 ms，超时或 DRM fd
+报告错误时结束整个显示会话，不继续提交新 flip。
+
+测试使用单调时钟控制总持续时间，默认板端脚本每 500 ms 切换一次。低频切换便于
+人眼确认两张 framebuffer 确实交替，而不是同一 buffer 被重复 modeset。
+
+### 5.2 为什么还需要显式确认桌面已停止
 
 RK3568 的 4.19 BSP 实测存在两个厂商行为：
 
@@ -134,6 +168,7 @@ RK3568 的 4.19 BSP 实测存在两个厂商行为：
 ```text
 /home/reynor/drm_probe
 /home/reynor/run_drm_color_bars_rk3568.sh
+/home/reynor/run_drm_page_flip_rk3568.sh
 ```
 
 不能使用 `/tmp` 作为最终运行目录。
@@ -179,6 +214,29 @@ Dumb Buffer 生命周期测试：
   /dev/dri/card0
 ```
 
+推荐的双缓冲动态翻页测试：
+
+```bash
+/home/reynor/run_drm_page_flip_rk3568.sh 10 500
+```
+
+参数依次为总持续秒数和翻页间隔毫秒数。只有明确要保持桌面停止时才添加第三个参数：
+
+```bash
+/home/reynor/run_drm_page_flip_rk3568.sh \
+  10 500 --keep-desktop-stopped
+```
+
+对应的底层命令为：
+
+```bash
+/home/reynor/drm_probe \
+  --page-flip-color-bars 10 \
+  --interval-ms 500 \
+  --confirm-desktop-stopped \
+  /dev/dri/card0
+```
+
 ## 8. RK3568 实板结果
 
 本阶段在 Weston、systemui 和厂商 camera 进程仍运行时连续执行两次通过：
@@ -214,6 +272,22 @@ Display cleanup: CRTC safely disabled; restart Weston
 码为 0，退出后 DRM client 表为空，证明 fd/master 没有遗留。之后已重新启动 Weston
 和 systemui，并从新的 ADB 会话确认进程及 1080x1920 CRTC 正常。
 
+双缓冲动态翻页测试在板端 `/home/reynor` 执行：
+
+```text
+Framebuffer A: 167 checksum=0x6345ae94419ea325
+Framebuffer B: 169 checksum=0xdc158b7da5eea325
+Interval: 500 ms
+Duration: 10 seconds maximum
+Completed flips: 19
+Cleanup: CRTC safely disabled; restart Weston
+```
+
+两个 framebuffer 的 ID 和 checksum 均不同，19 次请求均收到 flip-complete event，
+程序和脚本退出码为 0。脚本随后恢复 Weston、systemui 和 sysvolume；复查时 Weston
+重新成为 DRM master，DSI-1 恢复为 1080x1920 active，新的 Weston framebuffer ID
+为 170，未发现测试 framebuffer 或 `drm_probe` client 遗留。
+
 ## 9. 完成状态与下一步
 
 - [x] ISO C++11，并通过 `-Wall -Wextra -Wpedantic -Werror` 交叉构建。
@@ -228,7 +302,12 @@ Display cleanup: CRTC safely disabled; restart Weston
 - [x] 使用完整 mode timing 将 XRGB8888 色条绑定到 DSI CRTC。
 - [x] SIGINT/SIGTERM 只设置退出标志，由正常控制流完成 DRM 清理。
 - [x] 板端脚本按顺序停止/恢复桌面，并验证独占显示 5 秒通过。
+- [x] 两个 XRGB8888 framebuffer 的软件生命周期和反向色条已实现。
+- [x] `drmModePageFlip`、`poll`、`drmHandleEvent` 和 flip-complete 计数已实现。
+- [x] 同一时间只允许一个 flip 在途，收到事件后才释放旧 buffer 所有权。
+- [x] 动态翻页模式通过 RK3568 AArch64 的 C++11 严格交叉构建。
+- [x] 在 RK3568 实板执行 10 秒/500 ms 动态翻页，完成 19 次事件并恢复桌面。
+- [x] 现场人工确认两组正序/反序色条交替显示正常。
 
-下一小阶段是创建两个 XRGB8888 dumb framebuffer，使用 `drmModePageFlip` 和
-flip-complete event 在两张不同色条之间低频切换，先验证 framebuffer 状态和回收
-时机。该阶段仍不接入 V4L2、DMA-BUF 或 RGA。
+动态翻页实板验收通过后，下一小阶段是把 DRM dumb buffer 的 GEM handle 导出为
+DMA-BUF，并验证 RGA 能向其中写入离线测试图。当前阶段仍不接入 V4L2 或 RGA。

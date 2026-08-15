@@ -70,6 +70,7 @@ cmake_args=(
     # 板端正式产物不允许带着编译告警进入部署阶段。
     -DCAMERA_DEMO_WARNINGS_AS_ERRORS=ON
     -DCAMERA_DEMO_REQUIRE_DRM_PROBE=ON
+    -DCAMERA_DEMO_REQUIRE_RGA_DRM_TEST=ON
 )
 
 if [[ -n "${sysroot}" ]]; then
@@ -95,6 +96,12 @@ if [[ ! -f "${drm_probe_binary}" ]]; then
     exit 1
 fi
 
+rga_drm_test_binary="${stage_dir}/bin/rga_drm_test"
+if [[ ! -f "${rga_drm_test_binary}" ]]; then
+    echo "error: expected RGA/DRM test was not installed: ${rga_drm_test_binary}" >&2
+    exit 1
+fi
+
 # readelf 来自交叉工具链，不依赖宿主机 file 命令对架构名称的输出格式。
 machine="$("${readelf_tool}" -h "${binary}" | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')"
 if [[ "${machine}" != *AArch64* ]]; then
@@ -109,8 +116,16 @@ if [[ "${drm_probe_machine}" != *AArch64* ]]; then
     exit 1
 fi
 
+rga_drm_test_machine="$("${readelf_tool}" -h "${rga_drm_test_binary}" |
+    sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')"
+if [[ "${rga_drm_test_machine}" != *AArch64* ]]; then
+    echo "error: rga_drm_test is not an AArch64 ELF: ${rga_drm_test_machine}" >&2
+    exit 1
+fi
+
 echo "RK3568 build completed."
 echo "  ELF machine: ${machine}"
 echo "  Binary:      ${binary}"
 echo "  DRM probe:   ${drm_probe_binary}"
+echo "  RGA/DRM:     ${rga_drm_test_binary}"
 echo "  Deploy with: ./tools/deploy_rk3568.sh"

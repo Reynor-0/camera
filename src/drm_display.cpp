@@ -9,6 +9,11 @@
 #include <sys/mman.h>
 #include <sys/types.h>
 
+#include <fcntl.h>
+#include <poll.h>
+#include <unistd.h>
+
+#include <chrono>
 #include <cerrno>
 #include <cstring>
 #include <limits>
@@ -57,6 +62,193 @@ typedef std::unique_ptr<drmModeConnector, DrmConnectorDeleter>
 typedef std::unique_ptr<drmModeCrtc, DrmCrtcDeleter> DrmCrtcOwner;
 
 }  // namespace
+
+DrmDumbBuffer::DrmDumbBuffer(int drm_fd,
+                             std::uint32_t width,
+                             std::uint32_t height,
+                             std::uint32_t bits_per_pixel)
+    : drm_fd_(drm_fd),
+      width_(width),
+      height_(height),
+      bits_per_pixel_(bits_per_pixel)
+{
+    if (drm_fd_ < 0 || width_ == 0U || height_ == 0U ||
+        bits_per_pixel_ == 0U) {
+        throw std::invalid_argument(
+            "DrmDumbBuffer requires valid fd, dimensions and bit depth");
+    }
+
+    try {
+        drm_mode_create_dumb create{};
+        create.width = width_;
+        create.height = height_;
+        create.bpp = bits_per_pixel_;
+        if (drmIoctl(drm_fd_, DRM_IOCTL_MODE_CREATE_DUMB, &create) != 0) {
+            throw framebufferError("DRM_IOCTL_MODE_CREATE_DUMB(raw)", errno);
+        }
+        handle_ = create.handle;
+        if (handle_ == 0U || create.pitch == 0U || create.size == 0U) {
+            throw std::runtime_error(
+                "DRM_IOCTL_MODE_CREATE_DUMB(raw) returned invalid metadata");
+        }
+        if (create.size >
+            static_cast<std::uint64_t>(
+                std::numeric_limits<std::size_t>::max())) {
+            throw std::runtime_error(
+                "DRM dumb buffer is too large for this process");
+        }
+
+        const std::uint64_t visible_row_bits =
+            static_cast<std::uint64_t>(width_) * bits_per_pixel_;
+        const std::uint64_t visible_row_bytes =
+            (visible_row_bits + 7U) / 8U;
+        const std::uint64_t required_size =
+            static_cast<std::uint64_t>(create.pitch) * height_;
+        if (visible_row_bytes > create.pitch || required_size > create.size) {
+            throw std::runtime_error(
+                "DRM_IOCTL_MODE_CREATE_DUMB(raw) returned unsafe layout");
+        }
+        pitch_ = create.pitch;
+        size_ = static_cast<std::size_t>(create.size);
+
+        drm_mode_map_dumb map_request{};
+        map_request.handle = handle_;
+        if (drmIoctl(drm_fd_, DRM_IOCTL_MODE_MAP_DUMB, &map_request) != 0) {
+            throw framebufferError("DRM_IOCTL_MODE_MAP_DUMB(raw)", errno);
+        }
+        if (map_request.offset >
+            static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
+            throw std::runtime_error(
+                "DRM dumb mmap offset cannot be represented by off_t");
+        }
+
+        mapping_ = ::mmap(nullptr,
+                          size_,
+                          PROT_READ | PROT_WRITE,
+                          MAP_SHARED,
+                          drm_fd_,
+                          static_cast<off_t>(map_request.offset));
+        if (mapping_ == MAP_FAILED) {
+            mapping_ = nullptr;
+            throw framebufferError("mmap(DRM dumb raw buffer)", errno);
+        }
+    } catch (...) {
+        releaseResources(false);
+        throw;
+    }
+}
+
+DrmDumbBuffer::~DrmDumbBuffer()
+{
+    releaseResources(false);
+}
+
+int DrmDumbBuffer::dmaBufFd()
+{
+    if (handle_ == 0U || mapping_ == nullptr) {
+        throw std::logic_error(
+            "dmaBufFd requires a valid DRM dumb buffer");
+    }
+    if (dma_buf_fd_ >= 0) {
+        return dma_buf_fd_;
+    }
+
+    int exported_fd = -1;
+    if (drmPrimeHandleToFD(drm_fd_,
+                           handle_,
+                           DRM_CLOEXEC | DRM_RDWR,
+                           &exported_fd) != 0) {
+        throw framebufferError("drmPrimeHandleToFD(raw)", errno);
+    }
+    if (exported_fd < 0) {
+        throw std::runtime_error(
+            "drmPrimeHandleToFD(raw) returned an invalid fd");
+    }
+    dma_buf_fd_ = exported_fd;
+    return dma_buf_fd_;
+}
+
+void* DrmDumbBuffer::data() noexcept
+{
+    return mapping_;
+}
+
+const void* DrmDumbBuffer::data() const noexcept
+{
+    return mapping_;
+}
+
+std::uint32_t DrmDumbBuffer::width() const noexcept
+{
+    return width_;
+}
+
+std::uint32_t DrmDumbBuffer::height() const noexcept
+{
+    return height_;
+}
+
+std::uint32_t DrmDumbBuffer::bitsPerPixel() const noexcept
+{
+    return bits_per_pixel_;
+}
+
+std::uint32_t DrmDumbBuffer::pitch() const noexcept
+{
+    return pitch_;
+}
+
+std::size_t DrmDumbBuffer::size() const noexcept
+{
+    return size_;
+}
+
+std::uint32_t DrmDumbBuffer::handle() const noexcept
+{
+    return handle_;
+}
+
+void DrmDumbBuffer::release()
+{
+    releaseResources(true);
+}
+
+void DrmDumbBuffer::releaseResources(bool report_error)
+{
+    int first_error = 0;
+    const char* first_operation = nullptr;
+
+    if (dma_buf_fd_ >= 0) {
+        if (::close(dma_buf_fd_) != 0 && first_error == 0) {
+            first_error = errno;
+            first_operation = "close(DRM PRIME raw fd)";
+        }
+        dma_buf_fd_ = -1;
+    }
+    if (mapping_ != nullptr && size_ > 0U) {
+        if (::munmap(mapping_, size_) != 0 && first_error == 0) {
+            first_error = errno;
+            first_operation = "munmap(DRM dumb raw buffer)";
+        }
+        mapping_ = nullptr;
+    }
+    if (handle_ != 0U) {
+        drm_mode_destroy_dumb destroy{};
+        destroy.handle = handle_;
+        if (drmIoctl(drm_fd_, DRM_IOCTL_MODE_DESTROY_DUMB, &destroy) != 0 &&
+            first_error == 0) {
+            first_error = errno;
+            first_operation = "DRM_IOCTL_MODE_DESTROY_DUMB(raw)";
+        }
+        handle_ = 0U;
+    }
+    pitch_ = 0U;
+    size_ = 0U;
+
+    if (report_error && first_error != 0) {
+        throw framebufferError(first_operation, first_error);
+    }
+}
 
 DrmDumbFramebuffer::DrmDumbFramebuffer(int drm_fd,
                                        std::uint32_t width,
@@ -171,7 +363,7 @@ DrmDumbFramebuffer::~DrmDumbFramebuffer()
     releaseResources(false);
 }
 
-void DrmDumbFramebuffer::fillColorBars()
+void DrmDumbFramebuffer::fillColorBars(bool reverse_order)
 {
     if (mapping_ == nullptr || size_ == 0U || framebuffer_id_ == 0U) {
         throw std::logic_error(
@@ -195,9 +387,12 @@ void DrmDumbFramebuffer::fillColorBars()
             base + static_cast<std::size_t>(y) *
                        static_cast<std::size_t>(pitch_));
         for (std::uint32_t x = 0U; x < width_; ++x) {
-            const std::size_t color_index =
+            const std::size_t forward_index =
                 static_cast<std::size_t>(x) * color_count /
                 static_cast<std::size_t>(width_);
+            const std::size_t color_index =
+                reverse_order ? color_count - 1U - forward_index
+                              : forward_index;
             row[x] = kColors[color_index];
         }
     }
@@ -256,10 +451,43 @@ std::uint32_t DrmDumbFramebuffer::framebufferId() const noexcept
     return framebuffer_id_;
 }
 
+int DrmDumbFramebuffer::dmaBufFd()
+{
+    if (handle_ == 0U || framebuffer_id_ == 0U || mapping_ == nullptr) {
+        throw std::logic_error(
+            "dmaBufFd requires a valid DRM dumb framebuffer");
+    }
+    if (dma_buf_fd_ >= 0) {
+        return dma_buf_fd_;
+    }
+
+    int exported_fd = -1;
+    if (drmPrimeHandleToFD(drm_fd_,
+                           handle_,
+                           DRM_CLOEXEC | DRM_RDWR,
+                           &exported_fd) != 0) {
+        throw framebufferError("drmPrimeHandleToFD(framebuffer)", errno);
+    }
+    if (exported_fd < 0) {
+        throw std::runtime_error(
+            "drmPrimeHandleToFD(framebuffer) returned an invalid fd");
+    }
+    dma_buf_fd_ = exported_fd;
+    return dma_buf_fd_;
+}
+
 void DrmDumbFramebuffer::releaseResources(bool report_error)
 {
     int first_error = 0;
     const char* first_operation = nullptr;
+
+    if (dma_buf_fd_ >= 0) {
+        if (::close(dma_buf_fd_) != 0 && first_error == 0) {
+            first_error = errno;
+            first_operation = "close(DRM PRIME framebuffer fd)";
+        }
+        dma_buf_fd_ = -1;
+    }
 
     if (framebuffer_id_ != 0U) {
         if (drmModeRmFB(drm_fd_, framebuffer_id_) != 0 &&
@@ -427,6 +655,118 @@ struct DrmCrtcDisplay::Impl {
             throw framebufferError("drmModeSetCrtc(color bars)", errno);
         }
         display_active = true;
+        current_framebuffer_id = framebuffer_id;
+    }
+
+    /**
+     * @brief 接收 libdrm 分发的 flip-complete 事件并提交 buffer 所有权转换。
+     */
+    static void handlePageFlipEvent(int event_fd,
+                                    unsigned int sequence,
+                                    unsigned int tv_sec,
+                                    unsigned int tv_usec,
+                                    void* user_data)
+    {
+        static_cast<void>(event_fd);
+        static_cast<void>(tv_sec);
+        static_cast<void>(tv_usec);
+
+        Impl* const self = static_cast<Impl*>(user_data);
+        if (self == nullptr || !self->flip_pending) {
+            return;
+        }
+        self->current_framebuffer_id = self->pending_framebuffer_id;
+        self->pending_framebuffer_id = 0U;
+        self->flip_pending = false;
+        self->last_flip_sequence = sequence;
+        ++self->completed_flip_count;
+    }
+
+    /**
+     * @brief 提交 page flip，并同步等待内核完成事件。
+     */
+    std::uint64_t pageFlipAndWait(std::uint32_t framebuffer_id,
+                                  int timeout_ms)
+    {
+        if (framebuffer_id == 0U || timeout_ms <= 0) {
+            throw std::invalid_argument(
+                "pageFlipAndWait requires a framebuffer ID and positive timeout");
+        }
+        if (released) {
+            throw std::logic_error(
+                "DrmCrtcDisplay session has already been restored");
+        }
+        if (!display_active) {
+            throw std::logic_error(
+                "pageFlipAndWait requires an active CRTC");
+        }
+        if (flip_pending) {
+            throw std::logic_error(
+                "a DRM page flip is already pending");
+        }
+        if (framebuffer_id == current_framebuffer_id) {
+            throw std::logic_error(
+                "pageFlipAndWait requires a different framebuffer");
+        }
+
+        pending_framebuffer_id = framebuffer_id;
+        flip_pending = true;
+        if (drmModePageFlip(drm_fd,
+                            crtc_id,
+                            framebuffer_id,
+                            DRM_MODE_PAGE_FLIP_EVENT,
+                            this) != 0) {
+            const int error = errno;
+            pending_framebuffer_id = 0U;
+            flip_pending = false;
+            throw framebufferError("drmModePageFlip", error);
+        }
+
+        drmEventContext event_context{};
+        event_context.version = DRM_EVENT_CONTEXT_VERSION;
+        event_context.page_flip_handler = &Impl::handlePageFlipEvent;
+
+        const std::chrono::steady_clock::time_point deadline =
+            std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(timeout_ms);
+        while (flip_pending) {
+            const std::chrono::steady_clock::time_point now =
+                std::chrono::steady_clock::now();
+            if (now >= deadline) {
+                throw std::runtime_error(
+                    "DRM page flip event timed out after " +
+                    std::to_string(timeout_ms) + " ms");
+            }
+
+            const std::chrono::milliseconds remaining =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    deadline - now);
+            const int poll_timeout =
+                remaining.count() > 0 ? static_cast<int>(remaining.count())
+                                      : 1;
+            pollfd descriptor{};
+            descriptor.fd = drm_fd;
+            descriptor.events = POLLIN;
+            const int poll_result = ::poll(&descriptor, 1, poll_timeout);
+            if (poll_result < 0) {
+                if (errno == EINTR) {
+                    continue;
+                }
+                throw framebufferError("poll(DRM page flip event)", errno);
+            }
+            if (poll_result == 0) {
+                continue;
+            }
+            if ((descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) != 0) {
+                throw std::runtime_error(
+                    "DRM fd reported an error while waiting for page flip");
+            }
+            if ((descriptor.revents & POLLIN) != 0 &&
+                drmHandleEvent(drm_fd, &event_context) != 0) {
+                throw framebufferError("drmHandleEvent(page flip)", errno);
+            }
+        }
+        return completed_flip_count;
     }
 
     /**
@@ -459,6 +799,9 @@ struct DrmCrtcDisplay::Impl {
             }
             display_active = false;
         }
+        flip_pending = false;
+        pending_framebuffer_id = 0U;
+        current_framebuffer_id = 0U;
 
         if (master_held) {
             if (drmDropMaster(drm_fd) != 0) {
@@ -502,6 +845,21 @@ struct DrmCrtcDisplay::Impl {
     /** true 表示测试 framebuffer 已经成功绑定到 CRTC。 */
     bool display_active{false};
 
+    /** 当前 CRTC 正在扫描的 framebuffer；0 表示尚未 modeset。 */
+    std::uint32_t current_framebuffer_id{0U};
+
+    /** 已提交但尚未收到完成事件的 framebuffer。 */
+    std::uint32_t pending_framebuffer_id{0U};
+
+    /** true 表示不得覆盖 current/pending 两个 framebuffer 或再提交 flip。 */
+    bool flip_pending{false};
+
+    /** 已完成 page flip 的总数。 */
+    std::uint64_t completed_flip_count{0U};
+
+    /** 最近一次完成事件中的 vblank sequence，保留供诊断。 */
+    unsigned int last_flip_sequence{0U};
+
     /** true 表示 release() 已经执行，不得再次 modeset。 */
     bool released{false};
 
@@ -532,6 +890,18 @@ DrmCrtcDisplay::~DrmCrtcDisplay() = default;
 void DrmCrtcDisplay::show(std::uint32_t framebuffer_id)
 {
     impl_->show(framebuffer_id);
+}
+
+std::uint64_t DrmCrtcDisplay::pageFlipAndWait(
+    std::uint32_t framebuffer_id,
+    int timeout_ms)
+{
+    return impl_->pageFlipAndWait(framebuffer_id, timeout_ms);
+}
+
+std::uint64_t DrmCrtcDisplay::completedFlipCount() const noexcept
+{
+    return impl_->completed_flip_count;
 }
 
 DrmCrtcRestoreResult DrmCrtcDisplay::restore()

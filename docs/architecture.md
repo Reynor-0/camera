@@ -11,6 +11,9 @@ IMX335，精确物理料号应以原理图、BOM 或芯片丝印为准。
 落地需要 RGA 完成旋转。经过板端 media graph、RGA、DRM plane 和厂商相机程序
 验证后的具体方案，见
 [RK3568 摄像头到 DSI 屏幕：硬件拓扑、软件模型与实现方案](rk3568_camera_to_dsi_pipeline.md)。
+已完成的“离线 NV12 DMA-BUF -> RGA 旋转/转换 -> DRM framebuffer”实板
+验证、内存布局和板端运行方法见
+[RK3568 离线 NV12 经 RGA 写入 DRM framebuffer](rga_drm_test.md)。
 本文保留通用 direct-scanout 架构和早期设计背景；涉及当前板卡的实现优先级、颜色
 转换、双 buffer pool 和 Weston 退出方案时，以该详细文档为准。
 

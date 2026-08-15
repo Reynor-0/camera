@@ -813,6 +813,11 @@ Weston 当前是 `/dev/dri/card0` 的 DRM master。专用程序启动顺序：
 - 检查 stride、UV offset、颜色范围、红蓝通道和裁剪边缘。
 - 用 CPU 参考转换仅做离线比对，不进入实时路径。
 
+当前小阶段已用 BT.709 limited NV12 色条完成 270° 旋转、XRGB8888 转换和
+DRM 显示的实板验证，单次 RGA 作业实测 4722 us。详细结果见
+[RK3568 离线 NV12 经 RGA 写入 DRM framebuffer](rga_drm_test.md)。带方向标识的
+人工视觉验收、90°路径和 CPU 参考图比对尚未执行，不将整个阶段 D 误标为完成。
+
 ### 阶段 E：端到端
 
 - V4L2 DQBUF → RGA → DRM page flip → V4L2 QBUF。

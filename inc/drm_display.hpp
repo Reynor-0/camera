@@ -6,6 +6,73 @@
 #include <string>
 
 /**
+ * @brief 拥有一块可 mmap、可导出 DMA-BUF 的线性 DRM dumb GEM buffer。
+ *
+ * 本类只管理存储，不创建 KMS framebuffer ID，也不修改显示状态。width、height 和
+ * bits_per_pixel 仅用于向 DRM_IOCTL_MODE_CREATE_DUMB 请求容量；其他硬件导入
+ * DMA-BUF 后必须使用自己的图像格式、有效尺寸和 stride 描述同一块内存。
+ */
+class DrmDumbBuffer {
+public:
+    /**
+     * @brief 创建并映射一块线性 GEM buffer。
+     * @param drm_fd 从 DrmDevice 借用的有效 DRM primary node fd。
+     * @param width 分配请求宽度，必须大于 0。
+     * @param height 分配请求高度，必须大于 0。
+     * @param bits_per_pixel 分配位深，当前测试使用 8 或 32。
+     * @throws std::invalid_argument 参数无效时抛出。
+     * @throws std::runtime_error CREATE_DUMB、MAP_DUMB 或 mmap 失败时抛出。
+     */
+    DrmDumbBuffer(int drm_fd,
+                  std::uint32_t width,
+                  std::uint32_t height,
+                  std::uint32_t bits_per_pixel);
+
+    /** @brief best-effort 关闭 DMA-BUF fd、解除 mmap 并销毁 GEM handle。 */
+    ~DrmDumbBuffer();
+
+    DrmDumbBuffer(const DrmDumbBuffer&) = delete;
+    DrmDumbBuffer& operator=(const DrmDumbBuffer&) = delete;
+
+    /**
+     * @brief 将 GEM handle 导出为当前对象拥有的 DMA-BUF fd。
+     * @return 可借给 RGA 等消费者使用的 fd；调用方不得 close。
+     * @throws std::logic_error buffer 已释放时抛出。
+     * @throws std::runtime_error drmPrimeHandleToFD 失败时抛出。
+     */
+    int dmaBufFd();
+
+    /** @brief 获取 CPU mmap 地址；所有权仍属于本对象。 */
+    void* data() noexcept;
+
+    /** @brief 获取只读 CPU mmap 地址；所有权仍属于本对象。 */
+    const void* data() const noexcept;
+
+    std::uint32_t width() const noexcept;
+    std::uint32_t height() const noexcept;
+    std::uint32_t bitsPerPixel() const noexcept;
+    std::uint32_t pitch() const noexcept;
+    std::size_t size() const noexcept;
+    std::uint32_t handle() const noexcept;
+
+    /** @brief 显式释放资源并在全部清理后报告第一个错误。 */
+    void release();
+
+private:
+    void releaseResources(bool report_error);
+
+    int drm_fd_{-1};
+    std::uint32_t width_{0U};
+    std::uint32_t height_{0U};
+    std::uint32_t bits_per_pixel_{0U};
+    std::uint32_t pitch_{0U};
+    std::size_t size_{0U};
+    std::uint32_t handle_{0U};
+    int dma_buf_fd_{-1};
+    void* mapping_{nullptr};
+};
+
+/**
  * @brief 拥有一个线性 XRGB8888 DRM dumb buffer 及其 framebuffer ID。
  *
  * 构造过程依次执行 CREATE_DUMB、MAP_DUMB、mmap 和 drmModeAddFB2，但不会把
@@ -46,9 +113,10 @@ public:
      * 写入顺序为红、绿、蓝、白、黑。函数先把包括 pitch padding 在内的完整映射
      * 清零，再逐像素写入，便于 checksum 稳定验证 mmap 确实可读写。
      *
+     * @param reverse_order true 时按黑、白、蓝、绿、红的反向顺序写入。
      * @throws std::logic_error framebuffer 已经 release 或映射无效时抛出。
      */
-    void fillColorBars();
+    void fillColorBars(bool reverse_order = false);
 
     /**
      * @brief 对完整 mmap 区域计算 64-bit FNV-1a checksum。
@@ -86,6 +154,12 @@ public:
     /** @brief 获取 drmModeAddFB2 创建的 framebuffer object ID。 */
     std::uint32_t framebufferId() const noexcept;
 
+    /**
+     * @brief 将底层 GEM handle 导出为当前对象拥有的 DMA-BUF fd。
+     * @return 可借给 RGA 使用的 fd；调用方不得 close。
+     */
+    int dmaBufFd();
+
 private:
     /**
      * @brief 释放当前已拥有的资源。
@@ -113,6 +187,9 @@ private:
 
     /** drmModeAddFB2 返回的 object ID；0 表示尚未创建或已释放。 */
     std::uint32_t framebuffer_id_{0U};
+
+    /** drmPrimeHandleToFD 返回的拥有型 fd；尚未导出时为 -1。 */
+    int dma_buf_fd_{-1};
 
     /** mmap 返回的地址；nullptr 表示尚未映射或已释放。 */
     void* mapping_{nullptr};
@@ -180,6 +257,28 @@ public:
      * @throws std::runtime_error drmModeSetCrtc() 失败时抛出。
      */
     void show(std::uint32_t framebuffer_id);
+
+    /**
+     * @brief 在下一个垂直消隐期切换 framebuffer，并等待完成事件。
+     *
+     * 函数先调用 drmModePageFlip(DRM_MODE_PAGE_FLIP_EVENT)，再通过 poll 和
+     * drmHandleEvent 等待内核的 flip-complete 事件。只有函数成功返回后，调用方
+     * 才能确认此前正在扫描的 framebuffer 已不再被该 CRTC 使用并可重新写入。
+     *
+     * @param framebuffer_id 下一帧的有效 KMS framebuffer ID，必须与当前 ID 不同。
+     * @param timeout_ms 等待完成事件的超时，单位为毫秒，必须大于 0。
+     * @return 从本会话开始以来成功完成的 page flip 总数。
+     * @throws std::invalid_argument 参数无效时抛出。
+     * @throws std::logic_error 尚未 show、会话已恢复、已有 flip 在途，或者请求重复
+     * framebuffer 时抛出。
+     * @throws std::runtime_error drmModePageFlip、poll、drmHandleEvent 失败或等待超时
+     * 时抛出。发生超时后应结束当前显示会话，不应继续提交新 flip。
+     */
+    std::uint64_t pageFlipAndWait(std::uint32_t framebuffer_id,
+                                  int timeout_ms);
+
+    /** @brief 获取已经收到 flip-complete 事件的 page flip 数量。 */
+    std::uint64_t completedFlipCount() const noexcept;
 
     /**
      * @brief 结束扫描输出并释放 DRM master。

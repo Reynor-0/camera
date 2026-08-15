@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(camera_demo VERSION 0.6.0 LANGUAGES CXX)
+project(camera_demo VERSION 0.8.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -16,6 +16,10 @@ option(CAMERA_DEMO_BUILD_DRM_PROBE
        "Build the DRM/KMS resource and dumb-buffer probe when libdrm is available" ON)
 option(CAMERA_DEMO_REQUIRE_DRM_PROBE
        "Fail configuration when drm_probe dependencies are unavailable" OFF)
+option(CAMERA_DEMO_BUILD_RGA_DRM_TEST
+       "Build the offline RGA-to-DRM test when librga is available" ON)
+option(CAMERA_DEMO_REQUIRE_RGA_DRM_TEST
+       "Fail configuration when rga_drm_test dependencies are unavailable" OFF)
 
 add_executable(camera_demo
     src/main.cpp
@@ -96,6 +100,54 @@ if(CAMERA_DEMO_BUILD_DRM_PROBE)
         endif()
 
         install(TARGETS drm_probe RUNTIME DESTINATION bin)
+
+        if(CAMERA_DEMO_BUILD_RGA_DRM_TEST)
+            find_path(LIBRGA_INCLUDE_DIR NAMES im2d.h PATH_SUFFIXES rga)
+            find_library(LIBRGA_LIBRARY NAMES rga)
+
+            if(LIBRGA_INCLUDE_DIR AND LIBRGA_LIBRARY)
+                add_executable(rga_drm_test
+                    src/drm_device.cpp
+                    src/drm_display.cpp
+                    src/rga_transform.cpp
+                    src/rga_drm_test_main.cpp
+                )
+                target_include_directories(rga_drm_test PRIVATE
+                    ${CMAKE_CURRENT_SOURCE_DIR}/inc
+                    ${LIBDRM_XF86_INCLUDE_DIR}
+                    ${LIBDRM_DRM_INCLUDE_DIR}
+                    ${LIBRGA_INCLUDE_DIR}
+                )
+                target_link_libraries(rga_drm_test PRIVATE
+                    ${LIBDRM_LIBRARY}
+                    ${LIBRGA_LIBRARY}
+                )
+                target_compile_features(rga_drm_test PRIVATE cxx_std_11)
+                target_compile_options(rga_drm_test PRIVATE
+                    -Wall
+                    -Wextra
+                    -Wpedantic
+                )
+                target_compile_definitions(rga_drm_test PRIVATE
+                    CAMERA_DEMO_VERSION="${PROJECT_VERSION}"
+                )
+                if(CAMERA_DEMO_WARNINGS_AS_ERRORS)
+                    target_compile_options(rga_drm_test PRIVATE -Werror)
+                endif()
+                if(CAMERA_DEMO_TARGET_RK3568_AARCH64)
+                    target_compile_definitions(rga_drm_test PRIVATE
+                        CAMERA_DEMO_TARGET_RK3568_AARCH64=1
+                    )
+                endif()
+                install(TARGETS rga_drm_test RUNTIME DESTINATION bin)
+            elseif(CAMERA_DEMO_REQUIRE_RGA_DRM_TEST)
+                message(FATAL_ERROR
+                    "rga_drm_test requires im2d.h and librga")
+            else()
+                message(WARNING
+                    "librga development files were not found; rga_drm_test is disabled")
+            endif()
+        endif()
     elseif(CAMERA_DEMO_REQUIRE_DRM_PROBE)
         message(FATAL_ERROR
             "drm_probe requires xf86drm.h, libdrm/drm.h and libdrm")

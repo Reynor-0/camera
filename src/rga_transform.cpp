@@ -44,7 +44,8 @@ RgaTransformResult rotateNv12ToBgrx8888(
     std::uint32_t destination_width,
     std::uint32_t destination_height,
     std::uint32_t destination_stride_pixels,
-    std::uint32_t destination_height_stride)
+    std::uint32_t destination_height_stride,
+    RgaYuvToRgbMode color_mode)
 {
     if (source_fd < 0 || destination_fd < 0) {
         throw std::invalid_argument(
@@ -81,10 +82,20 @@ RgaTransformResult rotateNv12ToBgrx8888(
         checkedInt(destination_height_stride, "destination height stride"),
         RK_FORMAT_BGRX_8888);
 
-    // 板端 librga 1.3.1/so 2.1.0 不支持 full-CSC 组合，但明确支持 BT.709
-    // limited YUV->RGB。真实相机接入前必须让 ISP 输出与此处一致的 limited range，
-    // 或另行选择经过验证的 full-range 转换路径，不能静默混用量化范围。
-    source.color_space_mode = IM_YUV_TO_RGB_BT709_LIMIT;
+    // 板端 librga 1.3.1/so 2.1.0 只提供 BT.601 limited、BT.601 full 和
+    // BT.709 limited 三种旧式 YUV->RGB CSC。调用方必须显式选择；这里不能根据
+    // NV12 fourcc 猜测矩阵或量化范围。
+    switch (color_mode) {
+        case RgaYuvToRgbMode::Bt601Limited:
+            source.color_space_mode = IM_YUV_TO_RGB_BT601_LIMIT;
+            break;
+        case RgaYuvToRgbMode::Bt601Full:
+            source.color_space_mode = IM_YUV_TO_RGB_BT601_FULL;
+            break;
+        case RgaYuvToRgbMode::Bt709Limited:
+            source.color_space_mode = IM_YUV_TO_RGB_BT709_LIMIT;
+            break;
+    }
     destination.color_space_mode = IM_COLOR_SPACE_DEFAULT;
 
     im_rect source_rect{};

@@ -14,6 +14,8 @@ IMX335，精确物理料号应以原理图、BOM 或芯片丝印为准。
 已完成的“离线 NV12 DMA-BUF -> RGA 旋转/转换 -> DRM framebuffer”实板
 验证、内存布局和板端运行方法见
 [RK3568 离线 NV12 经 RGA 写入 DRM framebuffer](rga_drm_test.md)。
+真实 V4L2 capture DMA-BUF 的单帧端到端所有权流程、实板数据和颜色空间限制见
+[RK3568 真实相机单帧 DMA-BUF 经 RGA 显示](camera_display_once.md)。
 本文保留通用 direct-scanout 架构和早期设计背景；涉及当前板卡的实现优先级、颜色
 转换、双 buffer pool 和 Weston 退出方案时，以该详细文档为准。
 
@@ -549,3 +551,7 @@ V4L2 MMAP 连续采集阶段见
 [V4L2 MMAP 连续采集计划](v4l2_mmap_capture_plan.md)，DMA-BUF 导出阶段见
 [DMA-BUF 导出开发计划](dma_buf_export_plan.md)。当前已完成的 DRM 资源探测与未绑定
 Dumb Buffer 生命周期验证见 [DRM/KMS 资源探测](drm_probe.md)。
+
+真实相机单帧链路见[单帧 DMA-BUF 经 RGA 显示](camera_display_once.md)；在此基础上
+实现的持续 V4L2 streaming、双 DRM framebuffer 和同步 flip-complete 所有权闭环见
+[连续相机 RGA 双缓冲翻页显示](camera_display_stream.md)。

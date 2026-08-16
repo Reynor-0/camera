@@ -262,7 +262,11 @@ void printActualFormat(std::uint32_t requested_width,
               << '\n'
               << "Actual format:    " << actual.width << 'x' << actual.height
               << ' ' << fourccToString(actual.pixel_format) << '\n'
-              << "Memory planes:    " << actual.plane_count << '\n';
+              << "Memory planes:    " << actual.plane_count << '\n'
+              << "Color metadata:   colorspace=" << actual.colorspace
+              << " xfer=" << actual.xfer_func
+              << " ycbcr=" << actual.ycbcr_enc
+              << " quantization=" << actual.quantization << '\n';
     for (std::uint32_t plane = 0U; plane < actual.plane_count; ++plane) {
         std::cout << "  Plane " << plane
                   << ": stride=" << actual.bytes_per_line[plane]

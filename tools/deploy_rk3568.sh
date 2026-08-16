@@ -15,7 +15,13 @@ project_dir="$(cd "${script_dir}/.." && pwd)"
 adb_command="${ADB:-adb}"
 stage_dir="${RK3568_STAGE_DIR:-${project_dir}/build-rk3568/stage}"
 board_directory="/home/reynor"
-binaries=(camera_demo drm_probe rga_drm_test)
+binaries=(
+    camera_demo
+    drm_probe
+    rga_drm_test
+    camera_display_once
+    camera_display_stream
+)
 
 if ! command -v "${adb_command}" >/dev/null 2>&1; then
     echo "error: adb was not found: ${adb_command}" >&2
@@ -52,6 +58,8 @@ test_scripts=(
     run_drm_color_bars_rk3568.sh
     run_drm_page_flip_rk3568.sh
     run_rga_drm_test_rk3568.sh
+    run_camera_display_once_rk3568.sh
+    run_camera_display_stream_rk3568.sh
 )
 for script_name in "${test_scripts[@]}"; do
     local_test_script="${project_dir}/tools/${script_name}"

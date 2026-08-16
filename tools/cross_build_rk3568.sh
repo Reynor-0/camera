@@ -102,6 +102,18 @@ if [[ ! -f "${rga_drm_test_binary}" ]]; then
     exit 1
 fi
 
+camera_display_once_binary="${stage_dir}/bin/camera_display_once"
+if [[ ! -f "${camera_display_once_binary}" ]]; then
+    echo "error: expected camera/DRM executable was not installed: ${camera_display_once_binary}" >&2
+    exit 1
+fi
+
+camera_display_stream_binary="${stage_dir}/bin/camera_display_stream"
+if [[ ! -f "${camera_display_stream_binary}" ]]; then
+    echo "error: expected continuous camera/DRM executable was not installed: ${camera_display_stream_binary}" >&2
+    exit 1
+fi
+
 # readelf 来自交叉工具链，不依赖宿主机 file 命令对架构名称的输出格式。
 machine="$("${readelf_tool}" -h "${binary}" | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')"
 if [[ "${machine}" != *AArch64* ]]; then
@@ -123,9 +135,25 @@ if [[ "${rga_drm_test_machine}" != *AArch64* ]]; then
     exit 1
 fi
 
+camera_display_once_machine="$("${readelf_tool}" -h "${camera_display_once_binary}" |
+    sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')"
+if [[ "${camera_display_once_machine}" != *AArch64* ]]; then
+    echo "error: camera_display_once is not an AArch64 ELF: ${camera_display_once_machine}" >&2
+    exit 1
+fi
+
+camera_display_stream_machine="$("${readelf_tool}" -h "${camera_display_stream_binary}" |
+    sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')"
+if [[ "${camera_display_stream_machine}" != *AArch64* ]]; then
+    echo "error: camera_display_stream is not an AArch64 ELF: ${camera_display_stream_machine}" >&2
+    exit 1
+fi
+
 echo "RK3568 build completed."
 echo "  ELF machine: ${machine}"
 echo "  Binary:      ${binary}"
 echo "  DRM probe:   ${drm_probe_binary}"
 echo "  RGA/DRM:     ${rga_drm_test_binary}"
+echo "  Camera/DRM:  ${camera_display_once_binary}"
+echo "  Stream/DRM:  ${camera_display_stream_binary}"
 echo "  Deploy with: ./tools/deploy_rk3568.sh"

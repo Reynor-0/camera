@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(camera_demo VERSION 0.8.0 LANGUAGES CXX)
+project(camera_demo VERSION 0.10.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -140,6 +140,80 @@ if(CAMERA_DEMO_BUILD_DRM_PROBE)
                     )
                 endif()
                 install(TARGETS rga_drm_test RUNTIME DESTINATION bin)
+
+                add_executable(camera_display_once
+                    src/v4l2_device.cpp
+                    src/v4l2_buffer.cpp
+                    src/drm_device.cpp
+                    src/drm_display.cpp
+                    src/rga_transform.cpp
+                    src/camera_display_once_main.cpp
+                )
+                target_include_directories(camera_display_once PRIVATE
+                    ${CMAKE_CURRENT_SOURCE_DIR}/inc
+                    ${LIBDRM_XF86_INCLUDE_DIR}
+                    ${LIBDRM_DRM_INCLUDE_DIR}
+                    ${LIBRGA_INCLUDE_DIR}
+                )
+                target_link_libraries(camera_display_once PRIVATE
+                    ${LIBDRM_LIBRARY}
+                    ${LIBRGA_LIBRARY}
+                )
+                target_compile_features(camera_display_once PRIVATE cxx_std_11)
+                target_compile_options(camera_display_once PRIVATE
+                    -Wall
+                    -Wextra
+                    -Wpedantic
+                )
+                target_compile_definitions(camera_display_once PRIVATE
+                    CAMERA_DEMO_VERSION="${PROJECT_VERSION}"
+                )
+                if(CAMERA_DEMO_WARNINGS_AS_ERRORS)
+                    target_compile_options(camera_display_once PRIVATE -Werror)
+                endif()
+                if(CAMERA_DEMO_TARGET_RK3568_AARCH64)
+                    target_compile_definitions(camera_display_once PRIVATE
+                        CAMERA_DEMO_TARGET_RK3568_AARCH64=1
+                    )
+                endif()
+                install(TARGETS camera_display_once RUNTIME DESTINATION bin)
+
+                add_executable(camera_display_stream
+                    src/v4l2_device.cpp
+                    src/v4l2_buffer.cpp
+                    src/drm_device.cpp
+                    src/drm_display.cpp
+                    src/rga_transform.cpp
+                    src/camera_display_stream_main.cpp
+                )
+                target_include_directories(camera_display_stream PRIVATE
+                    ${CMAKE_CURRENT_SOURCE_DIR}/inc
+                    ${LIBDRM_XF86_INCLUDE_DIR}
+                    ${LIBDRM_DRM_INCLUDE_DIR}
+                    ${LIBRGA_INCLUDE_DIR}
+                )
+                target_link_libraries(camera_display_stream PRIVATE
+                    ${LIBDRM_LIBRARY}
+                    ${LIBRGA_LIBRARY}
+                )
+                target_compile_features(camera_display_stream PRIVATE cxx_std_11)
+                target_compile_options(camera_display_stream PRIVATE
+                    -Wall
+                    -Wextra
+                    -Wpedantic
+                )
+                target_compile_definitions(camera_display_stream PRIVATE
+                    CAMERA_DEMO_VERSION="${PROJECT_VERSION}"
+                )
+                if(CAMERA_DEMO_WARNINGS_AS_ERRORS)
+                    target_compile_options(camera_display_stream PRIVATE -Werror)
+                endif()
+                if(CAMERA_DEMO_TARGET_RK3568_AARCH64)
+                    target_compile_definitions(camera_display_stream PRIVATE
+                        CAMERA_DEMO_TARGET_RK3568_AARCH64=1
+                    )
+                endif()
+                install(TARGETS camera_display_stream RUNTIME DESTINATION bin)
             elseif(CAMERA_DEMO_REQUIRE_RGA_DRM_TEST)
                 message(FATAL_ERROR
                     "rga_drm_test requires im2d.h and librga")

@@ -32,6 +32,41 @@ struct VideoFormat {
 
     /** 驱动要求为每个 memory plane 分配的最小字节数。 */
     std::array<std::uint32_t, VIDEO_MAX_PLANES> size_image{};
+
+    /** 实际扫描方式，当前相机链路应为 V4L2_FIELD_NONE。 */
+    std::uint32_t field{V4L2_FIELD_ANY};
+
+    /** G_FMT 返回的 V4L2_COLORSPACE_* 光度/色度定义。 */
+    std::uint32_t colorspace{V4L2_COLORSPACE_DEFAULT};
+
+    /** G_FMT 返回的 V4L2_XFER_FUNC_* 传递函数。 */
+    std::uint32_t xfer_func{V4L2_XFER_FUNC_DEFAULT};
+
+    /** G_FMT 返回的 V4L2_YCBCR_ENC_* 颜色矩阵。 */
+    std::uint32_t ycbcr_enc{V4L2_YCBCR_ENC_DEFAULT};
+
+    /** G_FMT 返回的 V4L2_QUANTIZATION_* 量化范围。 */
+    std::uint32_t quantization{V4L2_QUANTIZATION_DEFAULT};
+};
+
+/**
+ * @brief 保存应用希望通过 VIDIOC_S_FMT 请求的颜色元数据。
+ *
+ * 全部默认值等价于让驱动选择。硬件转换链路可填写明确值，但仍必须
+ * 以 VideoFormat 中的 G_FMT 回填值为准，不能把请求值当成已生效值。
+ */
+struct VideoColorMetadata {
+    /** V4L2_COLORSPACE_* 值。 */
+    std::uint32_t colorspace{V4L2_COLORSPACE_DEFAULT};
+
+    /** V4L2_XFER_FUNC_* 值。 */
+    std::uint32_t xfer_func{V4L2_XFER_FUNC_DEFAULT};
+
+    /** V4L2_YCBCR_ENC_* 值。 */
+    std::uint32_t ycbcr_enc{V4L2_YCBCR_ENC_DEFAULT};
+
+    /** V4L2_QUANTIZATION_* 值。 */
+    std::uint32_t quantization{V4L2_QUANTIZATION_DEFAULT};
 };
 
 /**
@@ -191,13 +226,16 @@ public:
      * @param width 请求的图像宽度，单位为像素。
      * @param height 请求的图像高度，单位为像素。
      * @param pixel_format 请求的 V4L2 fourcc，例如 V4L2_PIX_FMT_NV12。
+     * @param requested_color 请求的颜色空间、矩阵和量化范围；驱动可修改。
      * @return 驱动最终接受的宽高、fourcc 和每个 memory plane 的布局。
      * @throws std::runtime_error 设备能力查询、VIDIOC_S_FMT 或 VIDIOC_G_FMT
      * 失败时抛出。
      */
     VideoFormat setFormat(std::uint32_t width,
                           std::uint32_t height,
-                          std::uint32_t pixel_format);
+                          std::uint32_t pixel_format,
+                          const VideoColorMetadata& requested_color =
+                              VideoColorMetadata());
 
     /**
      * @brief 获取已经打开的 V4L2 设备 fd。

@@ -825,6 +825,13 @@ DRM 显示的实板验证，单次 RGA 作业实测 4722 us。详细结果见
 - 记录 capture、RGA、flip 三段时间和端到端延迟。
 - 监控 DDR 带宽、RGA 超时、DRM underrun、ISP error 和温度。
 
+当前已完成单帧同步子阶段：真实 capture DMA-BUF 由 RGA 读取，写入独立 DRM
+buffer，RGA 返回后立即 QBUF，实测 RGA 用时 7147 us。详细见
+[RK3568 真实相机单帧 DMA-BUF 经 RGA 显示](camera_display_once.md)。后续已实现持续
+streaming、双 DRM framebuffer 和同步 page-flip event 所有权闭环，设计与实板指标
+见[连续相机 RGA 双缓冲翻页显示](camera_display_stream.md)。异步 RGA、统一 poll 事件
+循环和长期稳定性仍未完成，因此阶段 E 尚未整体完成。
+
 ### 阶段 F：可选优化
 
 - atomic `TEST_ONLY` 验证 NV12 overlay、rotation、modifier、CSC 属性。

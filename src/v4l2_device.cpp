@@ -253,7 +253,8 @@ std::vector<PixelFormatInfo> V4L2Device::enumerateFormats() const
 
 VideoFormat V4L2Device::setFormat(std::uint32_t width,
                                   std::uint32_t height,
-                                  std::uint32_t pixel_format)
+                                  std::uint32_t pixel_format,
+                                  const VideoColorMetadata& requested_color)
 {
     const v4l2_buf_type type = captureType();
     // v4l2_format 内部是 union。必须先设置 type，再根据 type 访问 pix 或 pix_mp，
@@ -268,12 +269,20 @@ VideoFormat V4L2Device::setFormat(std::uint32_t width,
         format.fmt.pix_mp.height = height;
         format.fmt.pix_mp.pixelformat = pixel_format;
         format.fmt.pix_mp.field = V4L2_FIELD_ANY;
+        format.fmt.pix_mp.colorspace = requested_color.colorspace;
+        format.fmt.pix_mp.xfer_func = requested_color.xfer_func;
+        format.fmt.pix_mp.ycbcr_enc = requested_color.ycbcr_enc;
+        format.fmt.pix_mp.quantization = requested_color.quantization;
     } else {
         // single-planar API 使用 pix，整帧图像对应一个 memory plane。
         format.fmt.pix.width = width;
         format.fmt.pix.height = height;
         format.fmt.pix.pixelformat = pixel_format;
         format.fmt.pix.field = V4L2_FIELD_ANY;
+        format.fmt.pix.colorspace = requested_color.colorspace;
+        format.fmt.pix.xfer_func = requested_color.xfer_func;
+        format.fmt.pix.ycbcr_enc = requested_color.ycbcr_enc;
+        format.fmt.pix.quantization = requested_color.quantization;
     }
 
     if (xioctl(fd_, VIDIOC_S_FMT, &format) < 0) {
@@ -294,6 +303,11 @@ VideoFormat V4L2Device::setFormat(std::uint32_t width,
         result.width = actual.width;
         result.height = actual.height;
         result.pixel_format = actual.pixelformat;
+        result.field = actual.field;
+        result.colorspace = actual.colorspace;
+        result.xfer_func = actual.xfer_func;
+        result.ycbcr_enc = actual.ycbcr_enc;
+        result.quantization = actual.quantization;
         // 防御性限制数组下标。符合规范的驱动不会返回超过 VIDEO_MAX_PLANES 的值。
         result.plane_count =
             std::min<std::uint32_t>(actual.num_planes, VIDEO_MAX_PLANES);
@@ -308,6 +322,11 @@ VideoFormat V4L2Device::setFormat(std::uint32_t width,
         result.width = actual.width;
         result.height = actual.height;
         result.pixel_format = actual.pixelformat;
+        result.field = actual.field;
+        result.colorspace = actual.colorspace;
+        result.xfer_func = actual.xfer_func;
+        result.ycbcr_enc = actual.ycbcr_enc;
+        result.quantization = actual.quantization;
         result.plane_count = 1;
         result.bytes_per_line[0] = actual.bytesperline;
         result.size_image[0] = actual.sizeimage;

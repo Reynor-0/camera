@@ -1,10 +1,13 @@
 #!/bin/sh
 
-# 在 RK3568 上停止桌面，显示一帧真实相机图像，然后恢复桌面。
+# Usage (run as root on the RK3568 board):
+#   /home/reynor/camera-project/scripts/run_camera_display_once_rk3568.sh <1-300 seconds> [/dev/videoN] [auto|bt601-limited|bt601-full|bt709-limited] [--keep-desktop-stopped]
+#
+# 在 RK3568 上停止桌面，显示一帧真实相机图像，然后按开机策略决定是否恢复桌面。
 
 set -eu
 
-program="/home/reynor/camera_display_once"
+program="/home/reynor/camera-project/bin/camera_display_once"
 duration_seconds="${1:-10}"
 video_device="${2:-/dev/video0}"
 color_mode="${3:-auto}"
@@ -16,10 +19,19 @@ print_usage()
     echo "Usage: $0 <1-300 seconds> [/dev/videoN] [auto|bt601-limited|bt601-full|bt709-limited] [--keep-desktop-stopped]" >&2
 }
 
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    print_usage
+    exit 0
+fi
+
 restore_desktop()
 {
     if [ "${desktop_restore_required}" -eq 0 ] || \
        [ "${keep_desktop_stopped}" = "--keep-desktop-stopped" ]; then
+        return
+    fi
+    if [ ! -e /etc/init.d/S49weston ] || [ ! -e /etc/init.d/S50systemui ]; then
+        echo "Desktop autostart is disabled; leaving Weston/systemui stopped."
         return
     fi
 

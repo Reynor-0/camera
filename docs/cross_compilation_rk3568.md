@@ -136,16 +136,17 @@ ELF header 的 Machine 必须是 `AArch64`。动态依赖中不应出现开发�
 
 ## 6. 部署到开发板
 
-本项目规定所有传输到开发板的可执行文件统一放在 `/home/reynor`，不得部署到
-`/tmp`、`/usr/local/bin` 或其他目录。交叉构建完成后，在能够连接开发板的
-WSL 中执行：
+本项目规定所有传输到开发板的可执行文件统一放在
+`/home/reynor/camera-project/bin`，项目运行脚本放在
+`/home/reynor/camera-project/scripts`，不得部署到 `/tmp`、`/usr/local/bin` 或与
+板级管理工具混放。交叉构建完成后，在能够连接开发板的 WSL 中执行：
 
 ```bash
 ./tools/deploy_rk3568.sh
 ```
 
-脚本使用 ADB 部署当前项目的 `camera_demo` 和 `drm_probe`，并设置
-`0755` 权限。如果 adb 不在非交互 shell 的 PATH 中，可以显式指定：
+脚本使用 ADB 部署当前项目的全部可执行文件和运行脚本，并设置 `0755` 权限。如果
+adb 不在非交互 shell 的 PATH 中，可以显式指定：
 
 ```bash
 ADB=/home/reynor/tools/platform-tools/adb ./tools/deploy_rk3568.sh
@@ -154,9 +155,11 @@ ADB=/home/reynor/tools/platform-tools/adb ./tools/deploy_rk3568.sh
 手动部署时也必须使用相同目录：
 
 ```bash
-adb push build-rk3568/stage/bin/camera_demo /home/reynor/camera_demo
-adb push build-rk3568/stage/bin/drm_probe /home/reynor/drm_probe
-adb shell chmod 0755 /home/reynor/camera_demo /home/reynor/drm_probe
+adb shell mkdir -p /home/reynor/camera-project/bin
+adb push build-rk3568/stage/bin/camera_demo /home/reynor/camera-project/bin/camera_demo
+adb push build-rk3568/stage/bin/drm_probe /home/reynor/camera-project/bin/drm_probe
+adb shell chmod 0755 /home/reynor/camera-project/bin/camera_demo \
+  /home/reynor/camera-project/bin/drm_probe
 ```
 
 运行前检查权限和设备：

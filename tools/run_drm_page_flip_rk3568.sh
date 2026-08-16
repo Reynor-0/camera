@@ -1,5 +1,8 @@
 #!/bin/sh
 
+# Usage (run as root on the RK3568 board):
+#   /home/reynor/camera-project/scripts/run_drm_page_flip_rk3568.sh [1-300 seconds] [50-5000 interval-ms] [--keep-desktop-stopped]
+#
 # 在 RK3568 开发板上安全执行 DRM 双缓冲动态翻页测试。
 #
 # 默认流程：
@@ -11,7 +14,7 @@
 
 set -eu
 
-program="/home/reynor/drm_probe"
+program="/home/reynor/camera-project/bin/drm_probe"
 duration_seconds="${1:-10}"
 interval_ms="${2:-500}"
 keep_desktop_stopped="${3:-}"
@@ -22,10 +25,19 @@ print_usage()
     echo "Usage: $0 <1-300 seconds> <50-5000 interval-ms> [--keep-desktop-stopped]" >&2
 }
 
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    print_usage
+    exit 0
+fi
+
 restore_desktop()
 {
     if [ "${desktop_restore_required}" -eq 0 ] || \
        [ "${keep_desktop_stopped}" = "--keep-desktop-stopped" ]; then
+        return
+    fi
+    if [ ! -e /etc/init.d/S49weston ] || [ ! -e /etc/init.d/S50systemui ]; then
+        echo "Desktop autostart is disabled; leaving Weston/systemui stopped."
         return
     fi
 

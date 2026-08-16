@@ -43,7 +43,7 @@ RGA 覆盖。当前同步设计用 `writable_framebuffer` 在 A/B 间交替，�
 
 ## 3. 构建、部署和运行
 
-交叉构建并统一部署到板端 `/home/reynor`：
+交叉构建并统一部署到板端 `/home/reynor/camera-project`：
 
 ```bash
 ./tools/cross_build_rk3568.sh
@@ -53,7 +53,7 @@ ADB=/home/reynor/tools/platform-tools/adb ./tools/deploy_rk3568.sh
 在开发板运行 10 秒：
 
 ```bash
-cd /home/reynor
+cd /home/reynor/camera-project/scripts
 ./run_camera_display_stream_rk3568.sh 10 /dev/video0 bt709-limited
 ```
 
@@ -112,3 +112,6 @@ RGA time                min 5194 us, avg 6883.88 us, max 8970 us
 
 这证明同步双缓冲动态链路已经闭环，但尚不能替代 10 分钟/30 分钟压力测试，也未
 解决驱动声明 BT.709 Full 而旧版 RGA 无对应 CSC 的颜色元数据问题。
+
+从本 demo 演进为长期无人值守服务所需的退出状态机、分级故障恢复、Atomic KMS 和
+异步多帧流水线，见[摄像头显示工业化设计](industrial_camera_service_atomic_async.md)。

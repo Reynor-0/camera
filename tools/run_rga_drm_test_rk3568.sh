@@ -1,10 +1,13 @@
 #!/bin/sh
 
+# Usage (run as root on the RK3568 board):
+#   /home/reynor/camera-project/scripts/run_rga_drm_test_rk3568.sh [1-300 seconds] [--keep-desktop-stopped]
+#
 # 在 RK3568 开发板上安全执行离线 NV12 -> RGA -> DRM 显示测试。
 
 set -eu
 
-program="/home/reynor/rga_drm_test"
+program="/home/reynor/camera-project/bin/rga_drm_test"
 duration_seconds="${1:-10}"
 keep_desktop_stopped="${2:-}"
 desktop_restore_required=0
@@ -14,10 +17,19 @@ print_usage()
     echo "Usage: $0 <1-300 seconds> [--keep-desktop-stopped]" >&2
 }
 
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    print_usage
+    exit 0
+fi
+
 restore_desktop()
 {
     if [ "${desktop_restore_required}" -eq 0 ] || \
        [ "${keep_desktop_stopped}" = "--keep-desktop-stopped" ]; then
+        return
+    fi
+    if [ ! -e /etc/init.d/S49weston ] || [ ! -e /etc/init.d/S50systemui ]; then
+        echo "Desktop autostart is disabled; leaving Weston/systemui stopped."
         return
     fi
 

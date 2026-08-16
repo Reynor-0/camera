@@ -261,18 +261,35 @@ program --version
 - 帮助中必须包含模式说明、全部参数、默认值、单位和至少一个可运行示例。
 - 帮助和版本命令不得要求 `/dev/video*` 存在或具有设备权限。
 
+### 7.2 Shell 脚本自描述要求
+
+每个新增或修改的 `.sh` 文件必须在 shebang 后、执行逻辑前写明：
+
+- 一条或多条完整 `Usage` 示例；
+- 脚本应在 WSL 还是 RK3568 板端运行；
+- 是否要求 root；
+- 是否修改系统启动、进程或持久化状态；
+- 对应的恢复方式（如果操作会改变板端状态）。
+
+面向用户直接运行的脚本还必须支持 `-h` 或 `--help`，并在解析其他参数、访问设备或
+修改状态前处理帮助参数。
+
 ## 8. 编译与提交前检查
 
 ### 8.1 板端可执行文件部署目录
 
-所有通过 ADB、SCP 或其他方式传输到 RK3568 开发板的项目可执行文件，必须放在：
+所有通过 ADB、SCP 或其他方式传输到 RK3568 开发板的相机项目文件，必须按类型放在：
 
 ```text
-/home/reynor
+/home/reynor/camera-project/bin       项目可执行文件
+/home/reynor/camera-project/scripts   项目运行和测试脚本
+/home/reynor/camera-project/logs      项目运行日志
 ```
 
 禁止把项目测试程序放到 `/tmp` 或覆盖 `/usr/bin`、`/usr/local/bin`
-中的系统文件。统一目录便于人工运行、版本核对和清理。部署优先使用
+中的系统文件。板级管理脚本不属于相机项目，统一放到
+`/home/reynor/board-admin/<category>`，不得混入 `camera-project`。这种布局便于
+人工运行、版本核对和清理。项目部署优先使用
 `tools/deploy_rk3568.sh`。
 
 普通构建：

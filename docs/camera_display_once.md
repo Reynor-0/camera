@@ -97,7 +97,7 @@ buffer 的解释方式。旧的 `--allow-bt601-full-fallback` 仍兼容，并等
 
 ## 4. 构建、部署与运行
 
-所有产物必须交叉构建后部署到板端 `/home/reynor`：
+所有产物必须交叉构建后部署到板端 `/home/reynor/camera-project`：
 
 ```bash
 ./tools/cross_build_rk3568.sh
@@ -107,7 +107,7 @@ ADB=/home/reynor/tools/platform-tools/adb ./tools/deploy_rk3568.sh
 自动检查驱动元数据（当前 BSP 报告 BT.709 Full，因此会明确失败）：
 
 ```bash
-cd /home/reynor
+cd /home/reynor/camera-project/scripts
 ./run_camera_display_once_rk3568.sh 10 /dev/video0
 ```
 

@@ -166,9 +166,9 @@ RK3568 的 4.19 BSP 实测存在两个厂商行为：
 构建产物位于 `build-rk3568/stage/bin/drm_probe`。部署后板端文件为：
 
 ```text
-/home/reynor/drm_probe
-/home/reynor/run_drm_color_bars_rk3568.sh
-/home/reynor/run_drm_page_flip_rk3568.sh
+/home/reynor/camera-project/bin/drm_probe
+/home/reynor/camera-project/scripts/run_drm_color_bars_rk3568.sh
+/home/reynor/camera-project/scripts/run_drm_page_flip_rk3568.sh
 ```
 
 不能使用 `/tmp` 作为最终运行目录。
@@ -178,37 +178,37 @@ RK3568 的 4.19 BSP 实测存在两个厂商行为：
 只读探测：
 
 ```bash
-/home/reynor/drm_probe /dev/dri/card0
+/home/reynor/camera-project/bin/drm_probe /dev/dri/card0
 ```
 
 Dumb Buffer 生命周期测试：
 
 ```bash
-/home/reynor/drm_probe --test-dumb-buffer /dev/dri/card0
+/home/reynor/camera-project/bin/drm_probe --test-dumb-buffer /dev/dri/card0
 ```
 
 查看完整用法：
 
 ```bash
-/home/reynor/drm_probe --help
+/home/reynor/camera-project/bin/drm_probe --help
 ```
 
 推荐的独占色条测试会自动停止并恢复桌面：
 
 ```bash
-/home/reynor/run_drm_color_bars_rk3568.sh 5
+/home/reynor/camera-project/scripts/run_drm_color_bars_rk3568.sh 5
 ```
 
 只有明确准备让桌面保持停止时才使用：
 
 ```bash
-/home/reynor/run_drm_color_bars_rk3568.sh 5 --keep-desktop-stopped
+/home/reynor/camera-project/scripts/run_drm_color_bars_rk3568.sh 5 --keep-desktop-stopped
 ```
 
 底层命令不负责停止服务，只应由已经确认桌面停止的脚本或工程师调用：
 
 ```bash
-/home/reynor/drm_probe \
+/home/reynor/camera-project/bin/drm_probe \
   --show-color-bars 5 \
   --confirm-desktop-stopped \
   /dev/dri/card0
@@ -217,20 +217,20 @@ Dumb Buffer 生命周期测试：
 推荐的双缓冲动态翻页测试：
 
 ```bash
-/home/reynor/run_drm_page_flip_rk3568.sh 10 500
+/home/reynor/camera-project/scripts/run_drm_page_flip_rk3568.sh 10 500
 ```
 
 参数依次为总持续秒数和翻页间隔毫秒数。只有明确要保持桌面停止时才添加第三个参数：
 
 ```bash
-/home/reynor/run_drm_page_flip_rk3568.sh \
+/home/reynor/camera-project/scripts/run_drm_page_flip_rk3568.sh \
   10 500 --keep-desktop-stopped
 ```
 
 对应的底层命令为：
 
 ```bash
-/home/reynor/drm_probe \
+/home/reynor/camera-project/bin/drm_probe \
   --page-flip-color-bars 10 \
   --interval-ms 500 \
   --confirm-desktop-stopped \
@@ -272,7 +272,7 @@ Display cleanup: CRTC safely disabled; restart Weston
 码为 0，退出后 DRM client 表为空，证明 fd/master 没有遗留。之后已重新启动 Weston
 和 systemui，并从新的 ADB 会话确认进程及 1080x1920 CRTC 正常。
 
-双缓冲动态翻页测试在板端 `/home/reynor` 执行：
+双缓冲动态翻页测试在板端 `/home/reynor/camera-project/scripts` 执行：
 
 ```text
 Framebuffer A: 167 checksum=0x6345ae94419ea325

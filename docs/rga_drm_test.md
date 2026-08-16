@@ -111,7 +111,8 @@ usage:
 
 ## 6. 构建、部署和运行
 
-所有 AArch64 产物必须从 WSL 交叉构建，再通过 ADB 放入板端 `/home/reynor`：
+所有 AArch64 产物必须从 WSL 交叉构建，再通过 ADB 放入板端
+`/home/reynor/camera-project`：
 
 ```bash
 ./tools/cross_build_rk3568.sh
@@ -121,14 +122,14 @@ ADB=/home/reynor/tools/platform-tools/adb ./tools/deploy_rk3568.sh
 部署结果包括：
 
 ```text
-/home/reynor/rga_drm_test
-/home/reynor/run_rga_drm_test_rk3568.sh
+/home/reynor/camera-project/bin/rga_drm_test
+/home/reynor/camera-project/scripts/run_rga_drm_test_rk3568.sh
 ```
 
 推荐运行入口：
 
 ```bash
-cd /home/reynor
+cd /home/reynor/camera-project/scripts
 ./run_rga_drm_test_rk3568.sh 10
 ```
 

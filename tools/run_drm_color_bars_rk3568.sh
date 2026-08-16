@@ -1,18 +1,21 @@
 #!/bin/sh
 
+# Usage (run as root on the RK3568 board):
+#   /home/reynor/camera-project/scripts/run_drm_color_bars_rk3568.sh [1-300 seconds] [--keep-desktop-stopped]
+#
 # 在 RK3568 开发板上安全执行独占 DRM 色条测试。
 #
 # 默认流程：
 #   1. 停止 systemui、厂商 camera 和 Weston。
 #   2. 确认 Weston 不再持有 DRM master。
-#   3. 运行 /home/reynor/drm_probe 独占色条测试。
+#   3. 运行 /home/reynor/camera-project/bin/drm_probe 独占色条测试。
 #   4. 无论测试成功、失败或收到退出信号，都恢复 Weston 和 systemui。
 #
-# 本脚本必须部署到开发板 /home/reynor 后以 root 运行。
+# 本脚本必须部署到开发板 camera-project/scripts 后以 root 运行。
 
 set -eu
 
-program="/home/reynor/drm_probe"
+program="/home/reynor/camera-project/bin/drm_probe"
 duration_seconds="${1:-5}"
 keep_desktop_stopped="${2:-}"
 desktop_restore_required=0
@@ -22,10 +25,19 @@ print_usage()
     echo "Usage: $0 <1-300 seconds> [--keep-desktop-stopped]" >&2
 }
 
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+    print_usage
+    exit 0
+fi
+
 restore_desktop()
 {
     if [ "${desktop_restore_required}" -eq 0 ] || \
        [ "${keep_desktop_stopped}" = "--keep-desktop-stopped" ]; then
+        return
+    fi
+    if [ ! -e /etc/init.d/S49weston ] || [ ! -e /etc/init.d/S50systemui ]; then
+        echo "Desktop autostart is disabled; leaving Weston/systemui stopped."
         return
     fi
 

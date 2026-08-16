@@ -555,3 +555,7 @@ Dumb Buffer 生命周期验证见 [DRM/KMS 资源探测](drm_probe.md)。
 真实相机单帧链路见[单帧 DMA-BUF 经 RGA 显示](camera_display_once.md)；在此基础上
 实现的持续 V4L2 streaming、双 DRM framebuffer 和同步 flip-complete 所有权闭环见
 [连续相机 RGA 双缓冲翻页显示](camera_display_stream.md)。
+
+当前真实实现与本文早期 direct-scanout 目标之间的差异，以及从同步 legacy KMS demo
+演进到可恢复服务、Atomic KMS 和异步流水线的详细路线，见
+[摄像头显示工业化设计](industrial_camera_service_atomic_async.md)。

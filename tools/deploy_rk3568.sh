@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 
-# 将 RK3568 交叉编译产物统一部署到开发板 /home/reynor。
+# Usage (run in WSL from the project root or any directory):
+#   ADB=/home/reynor/tools/platform-tools/adb ./tools/deploy_rk3568.sh
+#
+# 将 RK3568 项目产物部署到 /home/reynor/camera-project，不混放板级管理脚本。
 #
 # 可选环境变量：
 #   ADB                 adb 可执行文件或绝对路径，默认从 PATH 查找 adb
@@ -14,7 +17,10 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(cd "${script_dir}/.." && pwd)"
 adb_command="${ADB:-adb}"
 stage_dir="${RK3568_STAGE_DIR:-${project_dir}/build-rk3568/stage}"
-board_directory="/home/reynor"
+board_project_directory="/home/reynor/camera-project"
+board_binary_directory="${board_project_directory}/bin"
+board_script_directory="${board_project_directory}/scripts"
+board_log_directory="${board_project_directory}/logs"
 binaries=(
     camera_demo
     drm_probe
@@ -22,6 +28,20 @@ binaries=(
     camera_display_once
     camera_display_stream
 )
+
+print_usage()
+{
+    echo "Usage: ADB=/path/to/adb $0 [--help]"
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    print_usage
+    exit 0
+fi
+if [[ "$#" -ne 0 ]]; then
+    print_usage >&2
+    exit 2
+fi
 
 if ! command -v "${adb_command}" >/dev/null 2>&1; then
     echo "error: adb was not found: ${adb_command}" >&2
@@ -35,11 +55,17 @@ if [[ "$("${adb_command}" get-state 2>/dev/null)" != "device" ]]; then
     exit 1
 fi
 
-"${adb_command}" shell "mkdir -p ${board_directory}"
+"${adb_command}" shell "mkdir -p ${board_binary_directory} ${board_script_directory} ${board_log_directory}"
+
+# 迁移旧版部署遗留的已知项目文件。范围使用固定白名单，不处理用户放在 home 中的
+# 其他文件。随后 push 当前版本，因此移动旧二进制不会造成版本倒退。
+for binary_name in "${binaries[@]}"; do
+    "${adb_command}" shell "if [ -e /home/reynor/${binary_name} ]; then mv /home/reynor/${binary_name} ${board_binary_directory}/${binary_name}; fi"
+done
 
 for binary_name in "${binaries[@]}"; do
     local_binary="${stage_dir}/bin/${binary_name}"
-    board_binary="${board_directory}/${binary_name}"
+    board_binary="${board_binary_directory}/${binary_name}"
 
     if [[ ! -f "${local_binary}" ]]; then
         echo "error: cross-built executable is missing: ${local_binary}" >&2
@@ -52,8 +78,7 @@ for binary_name in "${binaries[@]}"; do
     echo "Deployed: ${board_binary}"
 done
 
-# 板端独占显示涉及停止和恢复桌面服务。把受控运行脚本部署到同一目录，避免用户
-# 从 /tmp 或其他位置调用不同版本的脚本和可执行文件。
+# 板端独占显示脚本与 bin 分目录保存；脚本内部使用绝对项目路径。
 test_scripts=(
     run_drm_color_bars_rk3568.sh
     run_drm_page_flip_rk3568.sh
@@ -63,10 +88,16 @@ test_scripts=(
 )
 for script_name in "${test_scripts[@]}"; do
     local_test_script="${project_dir}/tools/${script_name}"
-    board_test_script="${board_directory}/${script_name}"
+    "${adb_command}" shell "if [ -e /home/reynor/${script_name} ]; then mv /home/reynor/${script_name} ${board_script_directory}/${script_name}; fi"
+    board_test_script="${board_script_directory}/${script_name}"
     "${adb_command}" push "${local_test_script}" "${board_test_script}"
     "${adb_command}" shell "chmod 0755 ${board_test_script}"
     echo "Deployed: ${board_test_script}"
 done
 
-echo "RK3568 deployment completed."
+legacy_logs=(capture-10min.log drm_color_bars.log record.log)
+for log_name in "${legacy_logs[@]}"; do
+    "${adb_command}" shell "if [ -e /home/reynor/${log_name} ]; then mv /home/reynor/${log_name} ${board_log_directory}/${log_name}; fi"
+done
+
+echo "RK3568 project deployment completed: ${board_project_directory}"

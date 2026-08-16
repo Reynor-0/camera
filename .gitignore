@@ -9,3 +9,8 @@ build-*/
 # 缓存
 .cache
 
+#
+.clangd
+
+#vs_code
+.vscode/

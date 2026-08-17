@@ -57,6 +57,20 @@ cd /home/reynor/camera-project/scripts
 ./run_camera_display_stream_rk3568.sh 10 /dev/video0 bt709-limited
 ```
 
+版本 0.11.0 起也可以持续运行到收到 SIGINT/SIGTERM：
+
+```bash
+./run_camera_display_stream_rk3568.sh \
+  forever /dev/video0 bt709-limited --keep-desktop-stopped
+```
+
+生命周期状态、稳定退出码、包装脚本信号转发和实板重复退出验收见
+[Camera Worker 长期运行与确定性退出](camera_worker_lifecycle.md)。
+
+版本 0.12.0 起，连续 3 次采集超时不再立即退出，而是有预算地复用原 buffer pool
+执行 `STREAMOFF -> QBUF all -> STREAMON`。恢复状态、指标、故障注入和边界见
+[V4L2 采集流局部恢复](capture_stream_recovery.md)。
+
 脚本停止 systemui、厂商 camera 和 Weston；程序退出后关闭 CRTC，脚本再恢复桌面。
 当前 BSP 报告 BT.709 Full，但板载 librga 不支持该模式，因此本阶段继续用已明确
 授权的 `bt709-limited` 诊断模式推进动态链路，不能把它视为最终颜色结论。

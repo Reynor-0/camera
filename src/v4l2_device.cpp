@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstring>
+#include <limits>
 #include <stdexcept>
 #include <string>
 
@@ -48,6 +49,31 @@ std::runtime_error systemError(const std::string& operation,
     return std::runtime_error(operation + " failed for " + path + ": " +
                               std::strerror(error) + " (errno=" +
                               std::to_string(error) + ")");
+}
+
+/**
+ * @brief 将项目中的 32 位 V4L2 颜色枚举安全写入 multi-planar UAPI 字段。
+ *
+ * `v4l2_pix_format_mplane` 将 xfer_func、ycbcr_enc 和 quantization 定义为
+ * `__u8`，而 single-planar 结构及本项目的公共元数据结构使用 32 位字段。这里
+ * 先验证范围再显式收窄，避免无效枚举值被静默截断后交给驱动。
+ *
+ * @param value 待写入的 V4L2 枚举值。
+ * @param field_name 用于异常信息的字段名。
+ * @return 可安全写入 multi-planar 格式结构的 8 位值。
+ * @throws std::invalid_argument value 超出内核 UAPI 字段可表达范围时抛出。
+ */
+std::uint8_t checkedMplaneColorField(std::uint32_t value,
+                                     const char* field_name)
+{
+    const std::uint32_t maximum =
+        static_cast<std::uint32_t>(std::numeric_limits<std::uint8_t>::max());
+    if (value > maximum) {
+        throw std::invalid_argument(
+            std::string("V4L2 multi-planar color field ") + field_name +
+            " is out of range: " + std::to_string(value));
+    }
+    return static_cast<std::uint8_t>(value);
 }
 
 /**
@@ -270,9 +296,12 @@ VideoFormat V4L2Device::setFormat(std::uint32_t width,
         format.fmt.pix_mp.pixelformat = pixel_format;
         format.fmt.pix_mp.field = V4L2_FIELD_ANY;
         format.fmt.pix_mp.colorspace = requested_color.colorspace;
-        format.fmt.pix_mp.xfer_func = requested_color.xfer_func;
-        format.fmt.pix_mp.ycbcr_enc = requested_color.ycbcr_enc;
-        format.fmt.pix_mp.quantization = requested_color.quantization;
+        format.fmt.pix_mp.xfer_func =
+            checkedMplaneColorField(requested_color.xfer_func, "xfer_func");
+        format.fmt.pix_mp.ycbcr_enc =
+            checkedMplaneColorField(requested_color.ycbcr_enc, "ycbcr_enc");
+        format.fmt.pix_mp.quantization = checkedMplaneColorField(
+            requested_color.quantization, "quantization");
     } else {
         // single-planar API 使用 pix，整帧图像对应一个 memory plane。
         format.fmt.pix.width = width;

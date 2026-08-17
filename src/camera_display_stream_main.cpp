@@ -17,6 +17,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 #if !defined(CAMERA_DEMO_VERSION)
 #define CAMERA_DEMO_VERSION "unknown"
@@ -29,13 +30,15 @@ static_assert(sizeof(void*) == 8U,
 
 namespace {
 
-volatile std::sig_atomic_t g_stop_requested = 0;
+/** 收到的第一个停止信号；0 表示尚未请求停止。 */
+volatile std::sig_atomic_t g_stop_signal = 0;
 
-/** @brief 请求连续显示循环进入正常清理路径。 */
+/** @brief 记录第一个停止信号，让主控制流进入正常清理路径。 */
 void requestStop(int signal_number)
 {
-    static_cast<void>(signal_number);
-    g_stop_requested = 1;
+    if (g_stop_signal == 0) {
+        g_stop_signal = signal_number;
+    }
 }
 
 /** @brief 在当前作用域安装并恢复 SIGINT/SIGTERM handler。 */
@@ -76,6 +79,9 @@ private:
 
 /** @brief 连续相机显示的命令行配置。 */
 struct Options {
+    /** true 表示忽略 duration_seconds，持续运行到收到停止信号。 */
+    bool run_forever{false};
+
     /** 连续显示时长，单位秒。 */
     std::uint32_t duration_seconds{10U};
 
@@ -90,6 +96,202 @@ struct Options {
 
     /** 用户指定或自动选择的 RGA YUV-to-RGB 模式。 */
     RgaYuvToRgbMode color_mode{RgaYuvToRgbMode::Bt709Limited};
+
+    /**
+     * 诊断模式下要人为触发的采集超时恢复次数；0 表示不注入故障。
+     *
+     * 每次注入会在至少 10 帧正常显示后制造一组连续超时，只用于验证恢复状态机，
+     * 不改变 V4L2 驱动或硬件状态。
+     */
+    std::uint32_t injected_capture_recoveries{0U};
+};
+
+/** 连续多少次采集超时后执行一次 L1 stream recovery。 */
+const std::uint32_t kCaptureTimeoutRecoveryThreshold = 3U;
+
+/** 每次等待 V4L2 帧的上限，单位毫秒。 */
+const int kCapturePollTimeoutMilliseconds = 1000;
+
+/** 一个恢复预算窗口内最多允许的 L1 stream recovery 次数。 */
+const std::size_t kCaptureRecoveryBudgetLimit = 3U;
+
+/** 恢复预算滑动窗口长度，单位秒。 */
+const std::uint32_t kCaptureRecoveryBudgetWindowSeconds = 60U;
+
+/** 两次诊断故障注入之间至少正常显示的帧数。 */
+const std::uint64_t kDiagnosticFramesBetweenRecoveries = 10U;
+
+/** @brief 同步 worker 对外稳定返回的进程退出码。 */
+enum class WorkerExitCode {
+    Success = 0,
+    RuntimeFailure = 1,
+    Usage = 2,
+    Configuration = 10,
+    Capture = 20,
+    Transform = 30,
+    Display = 40,
+    Internal = 50,
+};
+
+/** @brief 当前异常发生时正在操作的 pipeline 故障域。 */
+enum class FailureDomain {
+    Configuration,
+    Capture,
+    Transform,
+    Display,
+    Internal,
+};
+
+/** @brief 长期 worker 的顶层生命周期状态。 */
+enum class PipelineState {
+    Starting,
+    Running,
+    Stopping,
+    Stopped,
+    Failed,
+};
+
+/** @brief 正常离开连续显示循环的原因。 */
+enum class StopReason {
+    None,
+    DurationElapsed,
+    SigInt,
+    SigTerm,
+};
+
+/**
+ * @brief 为顶层 main() 保留故障域和稳定退出码。
+ *
+ * 底层对象仍使用标准异常报告 Linux/RGA/DRM 错误；runStream() 在资源已经完成
+ * RAII 回滚后，将异常包装为本类型，供 supervisor 区分故障域。
+ */
+class PipelineFailure : public std::runtime_error {
+public:
+    /**
+     * @brief 创建带故障域和稳定退出码的异常。
+     * @param domain 异常发生时正在执行的 pipeline 操作域。
+     * @param code supervisor 可据此决定是否重启的进程退出码。
+     * @param detail 底层异常的完整可读信息。
+     */
+    PipelineFailure(FailureDomain domain,
+                    WorkerExitCode code,
+                    const std::string& detail)
+        : std::runtime_error(detail), domain_(domain), code_(code)
+    {
+    }
+
+    /** @brief 返回异常所属的 pipeline 故障域。 */
+    FailureDomain domain() const noexcept { return domain_; }
+
+    /** @brief 返回应由 main() 使用的稳定进程退出码。 */
+    WorkerExitCode exitCode() const noexcept { return code_; }
+
+private:
+    FailureDomain domain_;
+    WorkerExitCode code_;
+};
+
+/**
+ * @brief 管理同步 camera worker 的顶层生命周期和正常停止原因。
+ *
+ * 本对象不拥有 V4L2、RGA 或 DRM 资源，只管理 Starting -> Running -> Stopping ->
+ * Stopped 状态。对象只在主线程访问，不是线程安全类型。
+ */
+class PipelineController {
+public:
+    /** @brief 创建处于 Starting 状态的控制器。 */
+    PipelineController() = default;
+
+    /**
+     * @brief 在全部设备初始化且 STREAMON 成功后进入 Running。
+     * @param run_forever true 表示没有时间截止点，只响应停止信号。
+     * @param duration_seconds 定时模式的最大运行秒数；forever 模式忽略该值。
+     * @throws std::logic_error 当前状态不是 Starting。
+     */
+    void beginRunning(bool run_forever, std::uint32_t duration_seconds)
+    {
+        if (state_ != PipelineState::Starting) {
+            throw std::logic_error(
+                "PipelineController::beginRunning requires Starting");
+        }
+        run_forever_ = run_forever;
+        stream_start_ = std::chrono::steady_clock::now();
+        deadline_ = stream_start_ + std::chrono::seconds(duration_seconds);
+        state_ = PipelineState::Running;
+    }
+
+    /**
+     * @brief 检查停止信号和定时截止点，决定是否继续处理新帧。
+     * @return 仍处于 Running 时返回 true；已进入 Stopping 时返回 false。
+     * @throws std::logic_error 当前状态既不是 Running 也不是 Stopping。
+     */
+    bool shouldContinue()
+    {
+        if (state_ == PipelineState::Stopping) {
+            return false;
+        }
+        if (state_ != PipelineState::Running) {
+            throw std::logic_error(
+                "PipelineController::shouldContinue requires Running");
+        }
+
+        if (g_stop_signal == SIGINT) {
+            requestStop(StopReason::SigInt);
+        } else if (g_stop_signal == SIGTERM) {
+            requestStop(StopReason::SigTerm);
+        } else if (!run_forever_ &&
+                   std::chrono::steady_clock::now() >= deadline_) {
+            requestStop(StopReason::DurationElapsed);
+        }
+        return state_ == PipelineState::Running;
+    }
+
+    /**
+     * @brief 在全部显式资源清理成功后进入 Stopped。
+     * @throws std::logic_error 当前状态不是 Stopping。
+     */
+    void finish()
+    {
+        if (state_ != PipelineState::Stopping) {
+            throw std::logic_error(
+                "PipelineController::finish requires Stopping");
+        }
+        state_ = PipelineState::Stopped;
+    }
+
+    /** @brief 在异常离开 pipeline 时记录 Failed，不执行任何资源操作。 */
+    void fail() noexcept { state_ = PipelineState::Failed; }
+
+    /** @brief 返回当前生命周期状态。 */
+    PipelineState state() const noexcept { return state_; }
+
+    /** @brief 返回正常停止原因；未进入 Stopping 前为 None。 */
+    StopReason stopReason() const noexcept { return stop_reason_; }
+
+    /** @brief 返回 STREAMON 后记录的单调时钟起点。 */
+    std::chrono::steady_clock::time_point streamStart() const noexcept
+    {
+        return stream_start_;
+    }
+
+private:
+    /**
+     * @brief 从 Running 原子地进入 Stopping 并固定第一个停止原因。
+     * @param reason 非 None 的正常停止原因。
+     */
+    void requestStop(StopReason reason)
+    {
+        if (state_ == PipelineState::Running && reason != StopReason::None) {
+            stop_reason_ = reason;
+            state_ = PipelineState::Stopping;
+        }
+    }
+
+    PipelineState state_{PipelineState::Starting};
+    StopReason stop_reason_{StopReason::None};
+    bool run_forever_{false};
+    std::chrono::steady_clock::time_point stream_start_{};
+    std::chrono::steady_clock::time_point deadline_{};
 };
 
 /** @brief 保存连续 capture/RGA/page-flip 循环的运行统计。 */
@@ -105,6 +307,21 @@ struct StreamStatistics {
 
     /** waitForFrame() 的正常超时次数。 */
     std::uint64_t timeouts{0U};
+
+    /** 实际开始执行的 L1 capture stream recovery 次数。 */
+    std::uint64_t capture_recovery_attempts{0U};
+
+    /** 完成 STREAMOFF/QBUF/STREAMON 的 L1 recovery 次数。 */
+    std::uint64_t capture_recovery_successes{0U};
+
+    /** 已开始但任一步骤失败的 L1 recovery 次数。 */
+    std::uint64_t capture_recovery_failures{0U};
+
+    /** 因 60 秒恢复预算耗尽而拒绝执行的恢复次数。 */
+    std::uint64_t capture_recovery_budget_exhaustions{0U};
+
+    /** 全部成功 L1 recovery 的累计耗时，单位毫秒。 */
+    std::uint64_t capture_recovery_total_milliseconds{0U};
 
     /** 根据 V4L2 sequence 发现的缺失帧数。 */
     std::uint64_t sequence_gaps{0U};
@@ -123,9 +340,118 @@ struct StreamStatistics {
     /** true 表示 sequence 字段已经由第一帧初始化。 */
     bool have_sequence{false};
 
+    /** true 表示 stream recovery 后的下一帧应建立新的 sequence 连续性基线。 */
+    bool sequence_baseline_pending{false};
+
     /** 第一帧 RGA 返回的版本字符串。 */
     std::string rga_version;
 };
+
+/**
+ * @brief 限制滑动时间窗口内允许发起的 capture stream recovery 次数。
+ *
+ * 本对象只记录恢复尝试的单调时钟时间，不拥有 V4L2 资源。超过预算时拒绝本次恢复，
+ * 由顶层按 capture 故障退出，避免永久硬件故障造成无界 STREAMOFF/ON 忙循环。
+ */
+class CaptureRecoveryBudget {
+public:
+    /**
+     * @brief 尝试消费一次恢复预算。
+     * @return 当前 60 秒窗口尚未达到 3 次时记录本次尝试并返回 true；否则返回
+     * false。
+     */
+    bool tryAcquire()
+    {
+        const std::chrono::steady_clock::time_point now =
+            std::chrono::steady_clock::now();
+        const std::chrono::seconds window(
+            kCaptureRecoveryBudgetWindowSeconds);
+        while (!attempts_.empty() && now - attempts_.front() >= window) {
+            attempts_.erase(attempts_.begin());
+        }
+        if (attempts_.size() >= kCaptureRecoveryBudgetLimit) {
+            return false;
+        }
+        attempts_.push_back(now);
+        return true;
+    }
+
+    /** @brief 返回当前滑动窗口内已经消费的恢复次数。 */
+    std::size_t attemptsInWindow() const noexcept { return attempts_.size(); }
+
+private:
+    std::vector<std::chrono::steady_clock::time_point> attempts_;
+};
+
+/** @brief 返回用于日志的稳定生命周期状态名。 */
+const char* pipelineStateName(PipelineState state)
+{
+    switch (state) {
+        case PipelineState::Starting:
+            return "STARTING";
+        case PipelineState::Running:
+            return "RUNNING";
+        case PipelineState::Stopping:
+            return "STOPPING";
+        case PipelineState::Stopped:
+            return "STOPPED";
+        case PipelineState::Failed:
+            return "FAILED";
+    }
+    return "UNKNOWN";
+}
+
+/** @brief 返回用于日志和 supervisor 诊断的稳定停止原因名。 */
+const char* stopReasonName(StopReason reason)
+{
+    switch (reason) {
+        case StopReason::None:
+            return "none";
+        case StopReason::DurationElapsed:
+            return "duration-elapsed";
+        case StopReason::SigInt:
+            return "SIGINT";
+        case StopReason::SigTerm:
+            return "SIGTERM";
+    }
+    return "unknown";
+}
+
+/** @brief 返回用于日志的稳定故障域名称。 */
+const char* failureDomainName(FailureDomain domain)
+{
+    switch (domain) {
+        case FailureDomain::Configuration:
+            return "configuration";
+        case FailureDomain::Capture:
+            return "capture";
+        case FailureDomain::Transform:
+            return "transform";
+        case FailureDomain::Display:
+            return "display";
+        case FailureDomain::Internal:
+            return "internal";
+    }
+    return "unknown";
+}
+
+/** @brief 将故障域映射为本阶段规定的稳定退出码。 */
+WorkerExitCode failureExitCode(FailureDomain domain)
+{
+    switch (domain) {
+        case FailureDomain::Configuration:
+            return WorkerExitCode::Configuration;
+        case FailureDomain::Capture:
+            return WorkerExitCode::Capture;
+        case FailureDomain::Transform:
+            return WorkerExitCode::Transform;
+        case FailureDomain::Display:
+            return WorkerExitCode::Display;
+        case FailureDomain::Internal:
+            return WorkerExitCode::Internal;
+    }
+    return WorkerExitCode::RuntimeFailure;
+}
 
 /**
  * @brief 输出连续显示程序的完整用法。
@@ -139,18 +465,35 @@ void printUsage(const char* program, std::ostream& output)
         << "Usage:\n"
         << "  " << program
         << " --stream <seconds> --confirm-desktop-stopped"
-           " [--color-mode MODE] [video-device] [drm-device]\n"
+           " [--color-mode MODE] [--inject-capture-timeout-recoveries N]"
+           " [video-device] [drm-device]\n"
+        << "  " << program
+        << " --run-forever --confirm-desktop-stopped"
+           " [--color-mode MODE] [--inject-capture-timeout-recoveries N]"
+           " [video-device] [drm-device]\n"
         << "  " << program << " -h | --help\n"
         << "  " << program << " --version\n\n"
         << "The program keeps four V4L2 MMAP capture buffers streaming and\n"
         << "alternates two XRGB8888 DRM framebuffers. RGA synchronously reads\n"
         << "each exported capture DMA-BUF, rotates 270 degrees, and writes only\n"
-        << "the framebuffer not currently scanned by the CRTC.\n\n"
+        << "the framebuffer not currently scanned by the CRTC. --run-forever\n"
+        << "keeps the worker active until SIGINT or SIGTERM; both signals follow\n"
+        << "the normal cleanup path and return exit code 0. Three consecutive\n"
+        << "1-second capture timeouts trigger STREAMOFF/QBUF/STREAMON recovery.\n"
+        << "At most three recoveries are allowed in a 60-second window.\n\n"
         << "Color modes:\n"
         << "  auto            trust V4L2 metadata; reject unsupported BT.709 full\n"
         << "  bt601-limited   force RGA BT.601 limited conversion (diagnostic)\n"
         << "  bt601-full      force RGA BT.601 full conversion (diagnostic)\n"
-        << "  bt709-limited   force RGA BT.709 limited conversion (diagnostic)\n";
+        << "  bt709-limited   force RGA BT.709 limited conversion (diagnostic)\n\n"
+        << "Diagnostics:\n"
+        << "  --inject-capture-timeout-recoveries N\n"
+        << "      inject 1..10 synthetic timeout streaks after normal frames;\n"
+        << "      this verifies recovery control flow without changing hardware.\n\n"
+        << "Example:\n"
+        << "  " << program
+        << " --stream 10 --confirm-desktop-stopped --color-mode"
+           " bt709-limited /dev/video0 /dev/dri/card0\n";
 }
 
 /**
@@ -182,6 +525,41 @@ std::uint32_t parseDuration(const std::string& text)
         value > static_cast<unsigned long>(
                     std::numeric_limits<std::uint32_t>::max())) {
         throw std::invalid_argument("duration must be between 1 and 3600");
+    }
+    return static_cast<std::uint32_t>(value);
+}
+
+/**
+ * @brief 解析诊断故障注入次数。
+ * @param text 只允许包含十进制数字的参数文本。
+ * @return 1..10 范围内的故障注入次数。
+ * @throws std::invalid_argument 文本或范围无效时抛出。
+ */
+std::uint32_t parseRecoveryInjectionCount(const std::string& text)
+{
+    if (text.empty()) {
+        throw std::invalid_argument(
+            "capture timeout recovery injection count must not be empty");
+    }
+    for (std::size_t index = 0U; index < text.size(); ++index) {
+        if (text[index] < '0' || text[index] > '9') {
+            throw std::invalid_argument(
+                "capture timeout recovery injection count must contain "
+                "decimal digits only");
+        }
+    }
+
+    std::size_t consumed = 0U;
+    unsigned long value = 0UL;
+    try {
+        value = std::stoul(text, &consumed, 10);
+    } catch (const std::exception&) {
+        throw std::invalid_argument(
+            "capture timeout recovery injection count must be between 1 and 10");
+    }
+    if (consumed != text.size() || value < 1UL || value > 10UL) {
+        throw std::invalid_argument(
+            "capture timeout recovery injection count must be between 1 and 10");
     }
     return static_cast<std::uint32_t>(value);
 }
@@ -234,18 +612,39 @@ const char* colorModeName(RgaYuvToRgbMode mode)
  */
 Options parseOptions(int argc, char* argv[])
 {
-    if (argc < 4 || std::string(argv[1]) != "--stream" ||
-        std::string(argv[3]) != "--confirm-desktop-stopped") {
+    if (argc < 3) {
         throw std::invalid_argument(
-            "expected --stream <seconds> --confirm-desktop-stopped");
+            "expected --stream <seconds> or --run-forever");
     }
 
     Options options;
-    options.duration_seconds = parseDuration(argv[2]);
+    int next_argument = 0;
+    const std::string run_mode = argv[1];
+    if (run_mode == "--stream") {
+        if (argc < 4 ||
+            std::string(argv[3]) != "--confirm-desktop-stopped") {
+            throw std::invalid_argument(
+                "expected --stream <seconds> --confirm-desktop-stopped");
+        }
+        options.duration_seconds = parseDuration(argv[2]);
+        next_argument = 4;
+    } else if (run_mode == "--run-forever") {
+        if (std::string(argv[2]) != "--confirm-desktop-stopped") {
+            throw std::invalid_argument(
+                "expected --run-forever --confirm-desktop-stopped");
+        }
+        options.run_forever = true;
+        next_argument = 3;
+    } else {
+        throw std::invalid_argument(
+            "expected --stream <seconds> or --run-forever");
+    }
+
     bool color_mode_seen = false;
+    bool recovery_injection_seen = false;
     bool have_video_device = false;
     bool have_drm_device = false;
-    for (int index = 4; index < argc; ++index) {
+    for (int index = next_argument; index < argc; ++index) {
         const std::string argument = argv[index];
         if (argument == "--color-mode") {
             if (color_mode_seen || index + 1 >= argc) {
@@ -260,6 +659,18 @@ Options parseOptions(int argc, char* argv[])
                 options.force_color_mode = true;
                 options.color_mode = parseColorMode(value);
             }
+        } else if (argument == "--inject-capture-timeout-recoveries") {
+            if (recovery_injection_seen || index + 1 >= argc) {
+                throw std::invalid_argument(
+                    "--inject-capture-timeout-recoveries requires one value "
+                    "and may appear only once");
+            }
+            recovery_injection_seen = true;
+            options.injected_capture_recoveries =
+                parseRecoveryInjectionCount(argv[++index]);
+        } else if (argument.size() >= 2U &&
+                   argument[0U] == '-' && argument[1U] == '-') {
+            throw std::invalid_argument("unknown option: " + argument);
         } else if (!have_video_device) {
             options.video_device = argument;
             have_video_device = true;
@@ -377,6 +788,11 @@ void updateStatistics(const CapturedFrame& frame,
         statistics->have_sequence = true;
         statistics->rga_min_microseconds = transform.elapsed_microseconds;
         statistics->rga_version = transform.version;
+    } else if (statistics->sequence_baseline_pending) {
+        // 驱动可以在 STREAMOFF/STREAMON 后延续或重置 sequence。恢复后的第一帧
+        // 只建立新的连续性基线，不能把合法重置误报为大量丢帧。
+        statistics->last_sequence = frame.sequence;
+        statistics->sequence_baseline_pending = false;
     } else {
         const std::uint32_t expected = statistics->last_sequence + 1U;
         if (frame.sequence != expected) {
@@ -399,6 +815,75 @@ void updateStatistics(const CapturedFrame& frame,
 }
 
 /**
+ * @brief 对仍然有效的 V4L2 buffer pool 执行一次 L1 stream recovery。
+ *
+ * 调用点必须位于采集等待超时路径，此时应用没有持有 DQBUF buffer。STREAMOFF
+ * 让驱动归还并清空全部 queue ownership，随后 queueAll 和 STREAMON 复用原有 mmap
+ * 与 DMA-BUF fd；DRM/RGA 资源不变，VOP 在此期间继续扫描最后一帧。
+ *
+ * @param queue 当前处于 Streaming 状态的 capture queue。
+ * @param budget 当前进程的恢复预算，不能为空。
+ * @param statistics 当前运行统计，不能为空。
+ * @throws std::invalid_argument 输出对象为空时抛出。
+ * @throws std::runtime_error 预算耗尽，或 STREAMOFF/QBUF/STREAMON 任一步失败时
+ * 抛出。
+ */
+void recoverCaptureStream(V4L2BufferQueue& queue,
+                          CaptureRecoveryBudget* budget,
+                          StreamStatistics* statistics)
+{
+    if (budget == nullptr || statistics == nullptr) {
+        throw std::invalid_argument(
+            "capture recovery requires budget and statistics");
+    }
+    if (!budget->tryAcquire()) {
+        ++statistics->capture_recovery_budget_exhaustions;
+        std::cerr
+            << "Recovery capture: BUDGET_EXHAUSTED level=L1 window_seconds="
+            << kCaptureRecoveryBudgetWindowSeconds
+            << " limit=" << kCaptureRecoveryBudgetLimit << '\n';
+        throw std::runtime_error(
+            "capture stream recovery budget exhausted: " +
+            std::to_string(kCaptureRecoveryBudgetLimit) +
+            " attempts in " +
+            std::to_string(kCaptureRecoveryBudgetWindowSeconds) +
+            " seconds");
+    }
+
+    ++statistics->capture_recovery_attempts;
+    const std::uint64_t attempt = statistics->capture_recovery_attempts;
+    const std::chrono::steady_clock::time_point recovery_start =
+        std::chrono::steady_clock::now();
+    std::cout << "Recovery capture: STARTING level=L1 attempt=" << attempt
+              << " reason=consecutive-timeouts attempts_in_window="
+              << budget->attemptsInWindow() << '\n';
+
+    try {
+        queue.stop();
+        queue.queueAll();
+        queue.start();
+    } catch (...) {
+        ++statistics->capture_recovery_failures;
+        std::cerr << "Recovery capture: FAILED level=L1 attempt=" << attempt
+                  << '\n';
+        throw;
+    }
+
+    const std::chrono::steady_clock::time_point recovery_end =
+        std::chrono::steady_clock::now();
+    const std::uint64_t elapsed_milliseconds =
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                recovery_end - recovery_start)
+                .count());
+    ++statistics->capture_recovery_successes;
+    statistics->capture_recovery_total_milliseconds += elapsed_milliseconds;
+    statistics->sequence_baseline_pending = statistics->have_sequence;
+    std::cout << "Recovery capture: SUCCEEDED level=L1 attempt=" << attempt
+              << " elapsed_ms=" << elapsed_milliseconds << '\n';
+}
+
+/**
  * @brief 执行连续 V4L2 DMA-BUF 到双 DRM framebuffer 的同步流水线。
  * @param options 已通过命令行范围校验的配置。
  */
@@ -406,194 +891,323 @@ void runStream(const Options& options)
 {
     const std::uint32_t source_width = 1920U;
     const std::uint32_t source_height = 1080U;
+    PipelineController controller;
+    FailureDomain failure_domain = FailureDomain::Internal;
+    g_stop_signal = 0;
+    std::cout << "Lifecycle: "
+              << pipelineStateName(controller.state()) << '\n';
 
-    V4L2Device camera(options.video_device);
-    VideoColorMetadata requested_color;
-    requested_color.colorspace = V4L2_COLORSPACE_REC709;
-    requested_color.xfer_func = V4L2_XFER_FUNC_709;
-    requested_color.ycbcr_enc = V4L2_YCBCR_ENC_709;
-    requested_color.quantization = V4L2_QUANTIZATION_LIM_RANGE;
-    const VideoFormat format = camera.setFormat(source_width,
-                                                source_height,
-                                                V4L2_PIX_FMT_NV12,
-                                                requested_color);
-    validateFormat(format);
-    const RgaYuvToRgbMode color_mode = selectColorMode(
-        format, options.force_color_mode, options.color_mode);
+    try {
+        // 尽早安装 handler，使初始化期间收到 SIGINT/SIGTERM 时也不会绕过 RAII。
+        SignalHandlerGuard signal_handlers;
 
-    V4L2BufferQueue queue(camera, format);
-    queue.requestBuffers(4U);
-    queue.exportDmaBuffers();
-    queue.queueAll();
+        failure_domain = FailureDomain::Capture;
+        V4L2Device camera(options.video_device);
+        VideoColorMetadata requested_color;
+        requested_color.colorspace = V4L2_COLORSPACE_REC709;
+        requested_color.xfer_func = V4L2_XFER_FUNC_709;
+        requested_color.ycbcr_enc = V4L2_YCBCR_ENC_709;
+        requested_color.quantization = V4L2_QUANTIZATION_LIM_RANGE;
+        const VideoFormat format = camera.setFormat(source_width,
+                                                    source_height,
+                                                    V4L2_PIX_FMT_NV12,
+                                                    requested_color);
 
-    DrmDevice drm(options.drm_device);
-    const DrmProbeResult display_info = drm.probe();
-    if (!display_info.dumb_buffer_supported ||
-        display_info.mode.width != source_height ||
-        display_info.mode.height != source_width) {
-        throw std::runtime_error(
-            "DRM target must support dumb buffers and 1080x1920 mode");
-    }
+        failure_domain = FailureDomain::Configuration;
+        validateFormat(format);
+        const RgaYuvToRgbMode color_mode = selectColorMode(
+            format, options.force_color_mode, options.color_mode);
 
-    // 声明顺序保证 display 先关闭 CRTC，然后才能删除两个 framebuffer。
-    DrmDumbFramebuffer framebuffer_a(drm.fd(),
-                                      display_info.mode.width,
-                                      display_info.mode.height);
-    DrmDumbFramebuffer framebuffer_b(drm.fd(),
-                                      display_info.mode.width,
-                                      display_info.mode.height);
-    if ((framebuffer_a.pitch() % 4U) != 0U ||
-        framebuffer_a.pitch() != framebuffer_b.pitch()) {
-        throw std::runtime_error(
-            "double XRGB8888 framebuffers have incompatible pitches");
-    }
-    DrmDumbFramebuffer* framebuffers[2] = {
-        &framebuffer_a,
-        &framebuffer_b,
-    };
-    const int destination_dma_fds[2] = {
-        framebuffer_a.dmaBufFd(),
-        framebuffer_b.dmaBufFd(),
-    };
+        failure_domain = FailureDomain::Capture;
+        V4L2BufferQueue queue(camera, format);
+        queue.requestBuffers(4U);
+        queue.exportDmaBuffers();
+        queue.queueAll();
 
-    DrmCrtcDisplay display(drm.fd(),
-                           display_info.connector_id,
-                           display_info.crtc_id,
-                           display_info.mode.name,
-                           display_info.mode.width,
-                           display_info.mode.height,
-                           true);
-    g_stop_requested = 0;
-    SignalHandlerGuard signal_handlers;
-    queue.start();
-
-    StreamStatistics statistics;
-    std::size_t writable_framebuffer = 0U;
-    bool display_active = false;
-    std::uint32_t consecutive_timeouts = 0U;
-    const std::chrono::steady_clock::time_point stream_start =
-        std::chrono::steady_clock::now();
-    const std::chrono::steady_clock::time_point deadline =
-        stream_start + std::chrono::seconds(options.duration_seconds);
-
-    std::cout
-        << "Continuous camera display started:\n"
-        << "  Camera: " << options.video_device << '\n'
-        << "  Source: 1920x1080 NV12, stride="
-        << format.bytes_per_line[0U] << " bytes\n"
-        << "  Capture buffers: " << queue.bufferCount() << '\n'
-        << "  Color metadata: colorspace=" << format.colorspace
-        << " xfer=" << format.xfer_func
-        << " ycbcr=" << format.ycbcr_enc
-        << " quantization=" << format.quantization << '\n'
-        << "  RGA color mode: " << colorModeName(color_mode)
-        << (options.force_color_mode ? " (forced diagnostic)" : " (metadata)")
-        << '\n'
-        << "  DRM framebuffers: A=" << framebuffer_a.framebufferId()
-        << " B=" << framebuffer_b.framebufferId()
-        << " pitch=" << framebuffer_a.pitch() << " bytes\n"
-        << "  Duration: " << options.duration_seconds << " seconds maximum\n";
-
-    while (g_stop_requested == 0 &&
-           std::chrono::steady_clock::now() < deadline) {
-        if (!queue.waitForFrame(1000)) {
-            ++statistics.timeouts;
-            ++consecutive_timeouts;
-            if (consecutive_timeouts >= 3U) {
-                throw std::runtime_error(
-                    "capture timed out three consecutive times");
-            }
-            continue;
+        failure_domain = FailureDomain::Display;
+        DrmDevice drm(options.drm_device);
+        const DrmProbeResult display_info = drm.probe();
+        if (!display_info.dumb_buffer_supported ||
+            display_info.mode.width != source_height ||
+            display_info.mode.height != source_width) {
+            throw std::runtime_error(
+                "DRM target must support dumb buffers and 1080x1920 mode");
         }
 
-        CapturedFrame frame;
-        if (!queue.tryDequeue(&frame)) {
-            continue;
+        // 声明顺序保证 display 先关闭 CRTC，然后才能删除两个 framebuffer。
+        DrmDumbFramebuffer framebuffer_a(drm.fd(),
+                                          display_info.mode.width,
+                                          display_info.mode.height);
+        DrmDumbFramebuffer framebuffer_b(drm.fd(),
+                                          display_info.mode.width,
+                                          display_info.mode.height);
+        if ((framebuffer_a.pitch() % 4U) != 0U ||
+            framebuffer_a.pitch() != framebuffer_b.pitch()) {
+            throw std::runtime_error(
+                "double XRGB8888 framebuffers have incompatible pitches");
         }
-        consecutive_timeouts = 0U;
-        if ((frame.flags & V4L2_BUF_FLAG_ERROR) != 0U) {
-            ++statistics.error_frames;
-            queue.requeue(frame.buffer_index);
-            continue;
-        }
-        validateCapturedFrame(frame, format);
+        DrmDumbFramebuffer* framebuffers[2] = {
+            &framebuffer_a,
+            &framebuffer_b,
+        };
+        const int destination_dma_fds[2] = {
+            framebuffer_a.dmaBufFd(),
+            framebuffer_b.dmaBufFd(),
+        };
 
-        DrmDumbFramebuffer& target = *framebuffers[writable_framebuffer];
-        const RgaTransformResult transform = rotateNv12ToBgrx8888(
-            frame.planes[0U].dma_buf_fd,
-            format.width,
-            format.height,
-            format.bytes_per_line[0U],
-            format.height,
-            destination_dma_fds[writable_framebuffer],
-            target.width(),
-            target.height(),
-            target.pitch() / 4U,
-            target.height(),
-            color_mode);
+        DrmCrtcDisplay display(drm.fd(),
+                               display_info.connector_id,
+                               display_info.crtc_id,
+                               display_info.mode.name,
+                               display_info.mode.width,
+                               display_info.mode.height,
+                               true);
 
-        // 同步 RGA 已完成读取，capture buffer 可以立即归还 ISP；目标 DRM buffer
-        // 是独立 GEM 存储，后续 VOP 扫描不会再引用该 V4L2 buffer。
-        updateStatistics(frame, transform, &statistics);
-        queue.requeue(frame.buffer_index);
+        failure_domain = FailureDomain::Capture;
+        queue.start();
+        controller.beginRunning(options.run_forever,
+                                options.duration_seconds);
+        std::cout << "Lifecycle: "
+                  << pipelineStateName(controller.state()) << '\n';
 
-        if (!display_active) {
-            display.show(target.framebufferId());
-            display_active = true;
+        StreamStatistics statistics;
+        CaptureRecoveryBudget capture_recovery_budget;
+        std::size_t writable_framebuffer = 0U;
+        bool display_active = false;
+        std::uint32_t consecutive_timeouts = 0U;
+        std::uint32_t diagnostic_recoveries_completed = 0U;
+        std::uint64_t next_diagnostic_injection_frame =
+            kDiagnosticFramesBetweenRecoveries;
+        bool diagnostic_timeout_streak_active = false;
+
+        std::cout
+            << "Continuous camera display started:\n"
+            << "  Camera: " << options.video_device << '\n'
+            << "  Source: 1920x1080 NV12, stride="
+            << format.bytes_per_line[0U] << " bytes\n"
+            << "  Capture buffers: " << queue.bufferCount() << '\n'
+            << "  Color metadata: colorspace=" << format.colorspace
+            << " xfer=" << format.xfer_func
+            << " ycbcr=" << format.ycbcr_enc
+            << " quantization=" << format.quantization << '\n'
+            << "  RGA color mode: " << colorModeName(color_mode)
+            << (options.force_color_mode
+                    ? " (forced diagnostic)"
+                    : " (metadata)")
+            << '\n'
+            << "  DRM framebuffers: A=" << framebuffer_a.framebufferId()
+            << " B=" << framebuffer_b.framebufferId()
+            << " pitch=" << framebuffer_a.pitch() << " bytes\n"
+            << "  Capture recovery: "
+            << kCaptureTimeoutRecoveryThreshold << " consecutive x "
+            << kCapturePollTimeoutMilliseconds << " ms; limit="
+            << kCaptureRecoveryBudgetLimit << " per "
+            << kCaptureRecoveryBudgetWindowSeconds << " seconds\n"
+            << "  Diagnostic recovery injections: "
+            << options.injected_capture_recoveries << '\n'
+            << "  Run limit: ";
+        if (options.run_forever) {
+            std::cout << "forever (until SIGINT/SIGTERM)\n";
         } else {
-            // writable_framebuffer 始终指向当前未被 VOP 扫描的目标。收到完成事件
-            // 后，上一块 framebuffer 才重新成为下一轮可写目标。
-            static_cast<void>(
-                display.pageFlipAndWait(target.framebufferId(), 2000));
+            std::cout << options.duration_seconds << " seconds maximum\n";
         }
-        ++statistics.displayed_frames;
-        writable_framebuffer = 1U - writable_framebuffer;
-    }
 
-    const std::chrono::steady_clock::time_point stream_end =
-        std::chrono::steady_clock::now();
-    if (!display_active || statistics.displayed_frames == 0U) {
-        throw std::runtime_error("no camera frame reached the display");
-    }
+        while (controller.shouldContinue()) {
+            failure_domain = FailureDomain::Capture;
+            if (!diagnostic_timeout_streak_active &&
+                diagnostic_recoveries_completed <
+                    options.injected_capture_recoveries &&
+                statistics.displayed_frames >=
+                    next_diagnostic_injection_frame) {
+                diagnostic_timeout_streak_active = true;
+                std::cout
+                    << "Diagnostic injection: capture timeout streak="
+                    << (diagnostic_recoveries_completed + 1U)
+                    << " after_displayed_frames="
+                    << statistics.displayed_frames << '\n';
+            }
 
-    queue.stop();
-    const std::uint64_t completed_flips = display.completedFlipCount();
-    const DrmCrtcRestoreResult restore_result = display.restore();
-    framebuffer_b.release();
-    framebuffer_a.release();
+            const bool frame_ready = diagnostic_timeout_streak_active
+                                         ? false
+                                         : queue.waitForFrame(
+                                               kCapturePollTimeoutMilliseconds);
+            if (!frame_ready) {
+                // poll 被停止信号打断时不把正常关机误计为采集超时。
+                if (!controller.shouldContinue()) {
+                    continue;
+                }
+                ++statistics.timeouts;
+                ++consecutive_timeouts;
+                if (consecutive_timeouts >=
+                    kCaptureTimeoutRecoveryThreshold) {
+                    recoverCaptureStream(queue,
+                                         &capture_recovery_budget,
+                                         &statistics);
+                    consecutive_timeouts = 0U;
+                    if (diagnostic_timeout_streak_active) {
+                        ++diagnostic_recoveries_completed;
+                        diagnostic_timeout_streak_active = false;
+                        next_diagnostic_injection_frame =
+                            statistics.displayed_frames +
+                            kDiagnosticFramesBetweenRecoveries;
+                    }
+                }
+                continue;
+            }
 
-    const double elapsed_seconds =
-        std::chrono::duration_cast<std::chrono::duration<double> >(
-            stream_end - stream_start)
-            .count();
-    const double capture_fps =
-        static_cast<double>(statistics.captured_frames) / elapsed_seconds;
-    const double display_fps =
-        static_cast<double>(statistics.displayed_frames) / elapsed_seconds;
-    const double average_rga_microseconds =
-        static_cast<double>(statistics.rga_total_microseconds) /
-        static_cast<double>(statistics.captured_frames);
+            CapturedFrame frame;
+            if (!queue.tryDequeue(&frame)) {
+                continue;
+            }
+            consecutive_timeouts = 0U;
+            if ((frame.flags & V4L2_BUF_FLAG_ERROR) != 0U) {
+                ++statistics.error_frames;
+                queue.requeue(frame.buffer_index);
+                continue;
+            }
+            validateCapturedFrame(frame, format);
 
-    std::cout
-        << "Continuous camera display complete:\n"
-        << "  Captured frames: " << statistics.captured_frames << '\n'
-        << "  Displayed frames: " << statistics.displayed_frames << '\n'
-        << "  Completed page flips: " << completed_flips << '\n'
-        << "  Error frames: " << statistics.error_frames << '\n'
-        << "  Capture timeouts: " << statistics.timeouts << '\n'
-        << "  Sequence gaps: " << statistics.sequence_gaps << '\n'
-        << "  Sequence range: " << statistics.first_sequence << ".."
-        << statistics.last_sequence << '\n'
-        << "  Elapsed: " << std::fixed << std::setprecision(3)
-        << elapsed_seconds << " seconds\n"
-        << "  Capture FPS: " << std::setprecision(2) << capture_fps << '\n'
-        << "  Display FPS: " << display_fps << '\n'
-        << "  RGA us: min=" << statistics.rga_min_microseconds
-        << " avg=" << average_rga_microseconds
-        << " max=" << statistics.rga_max_microseconds << '\n'
-        << "  RGA version: " << statistics.rga_version << '\n';
-    if (restore_result == DrmCrtcRestoreResult::kCrtcDisabled) {
-        std::cout << "  Cleanup: CRTC safely disabled; restart Weston\n";
+            failure_domain = FailureDomain::Transform;
+            DrmDumbFramebuffer& target = *framebuffers[writable_framebuffer];
+            const RgaTransformResult transform = rotateNv12ToBgrx8888(
+                frame.planes[0U].dma_buf_fd,
+                format.width,
+                format.height,
+                format.bytes_per_line[0U],
+                format.height,
+                destination_dma_fds[writable_framebuffer],
+                target.width(),
+                target.height(),
+                target.pitch() / 4U,
+                target.height(),
+                color_mode);
+
+            // 同步 RGA 已完成读取，capture buffer 可以立即归还 ISP；目标 DRM
+            // buffer 是独立 GEM 存储，VOP 扫描不会再引用该 V4L2 buffer。
+            failure_domain = FailureDomain::Internal;
+            updateStatistics(frame, transform, &statistics);
+            failure_domain = FailureDomain::Capture;
+            queue.requeue(frame.buffer_index);
+
+            failure_domain = FailureDomain::Display;
+            if (!display_active) {
+                display.show(target.framebufferId());
+                display_active = true;
+            } else {
+                // writable_framebuffer 始终指向当前未被 VOP 扫描的目标。收到完成
+                // 事件后，上一块 framebuffer 才重新成为下一轮可写目标。
+                static_cast<void>(
+                    display.pageFlipAndWait(target.framebufferId(), 2000));
+            }
+            ++statistics.displayed_frames;
+            writable_framebuffer = 1U - writable_framebuffer;
+        }
+
+        const std::chrono::steady_clock::time_point stream_end =
+            std::chrono::steady_clock::now();
+        std::cout << "Lifecycle: "
+                  << pipelineStateName(controller.state())
+                  << " reason=" << stopReasonName(controller.stopReason())
+                  << '\n';
+
+        // 定时运行却始终没有帧说明链路不健康；初始化期间立即收到停止信号则属于
+        // 合法的受控退出，仍需走下面的显式清理路径。
+        if ((!display_active || statistics.displayed_frames == 0U) &&
+            controller.stopReason() == StopReason::DurationElapsed) {
+            failure_domain = FailureDomain::Capture;
+            throw std::runtime_error("no camera frame reached the display");
+        }
+
+        failure_domain = FailureDomain::Capture;
+        queue.stop();
+        const std::uint64_t completed_flips = display.completedFlipCount();
+
+        failure_domain = FailureDomain::Display;
+        const DrmCrtcRestoreResult restore_result = display.restore();
+        framebuffer_b.release();
+        framebuffer_a.release();
+
+        failure_domain = FailureDomain::Internal;
+        controller.finish();
+
+        const double elapsed_seconds =
+            std::chrono::duration_cast<std::chrono::duration<double> >(
+                stream_end - controller.streamStart())
+                .count();
+        const double capture_fps =
+            elapsed_seconds > 0.0
+                ? static_cast<double>(statistics.captured_frames) /
+                      elapsed_seconds
+                : 0.0;
+        const double display_fps =
+            elapsed_seconds > 0.0
+                ? static_cast<double>(statistics.displayed_frames) /
+                      elapsed_seconds
+                : 0.0;
+        const double average_rga_microseconds =
+            statistics.captured_frames > 0U
+                ? static_cast<double>(statistics.rga_total_microseconds) /
+                      static_cast<double>(statistics.captured_frames)
+                : 0.0;
+
+        std::cout
+            << "Continuous camera display complete:\n"
+            << "  Stop reason: " << stopReasonName(controller.stopReason())
+            << '\n'
+            << "  Captured frames: " << statistics.captured_frames << '\n'
+            << "  Displayed frames: " << statistics.displayed_frames << '\n'
+            << "  Completed page flips: " << completed_flips << '\n'
+            << "  Error frames: " << statistics.error_frames << '\n'
+            << "  Capture timeouts: " << statistics.timeouts << '\n'
+            << "  Capture stream recoveries: attempted="
+            << statistics.capture_recovery_attempts
+            << " succeeded=" << statistics.capture_recovery_successes
+            << " failed=" << statistics.capture_recovery_failures
+            << " budget_exhausted="
+            << statistics.capture_recovery_budget_exhaustions << '\n'
+            << "  Capture recovery total ms: "
+            << statistics.capture_recovery_total_milliseconds << '\n'
+            << "  Sequence gaps: " << statistics.sequence_gaps << '\n';
+        if (statistics.have_sequence) {
+            std::cout << "  Sequence range: " << statistics.first_sequence
+                      << ".." << statistics.last_sequence << '\n';
+        } else {
+            std::cout << "  Sequence range: n/a\n";
+        }
+        std::cout
+            << "  Elapsed: " << std::fixed << std::setprecision(3)
+            << elapsed_seconds << " seconds\n"
+            << "  Capture FPS: " << std::setprecision(2) << capture_fps << '\n'
+            << "  Display FPS: " << display_fps << '\n'
+            << "  RGA us: min=" << statistics.rga_min_microseconds
+            << " avg=" << average_rga_microseconds
+            << " max=" << statistics.rga_max_microseconds << '\n'
+            << "  RGA version: "
+            << (statistics.rga_version.empty() ? "n/a" : statistics.rga_version)
+            << '\n'
+            << "  Cleanup V4L2: STREAMOFF complete\n"
+            << "  Cleanup DRM: "
+            << (restore_result == DrmCrtcRestoreResult::kCrtcDisabled
+                    ? "CRTC safely disabled"
+                    : "no CRTC change was required")
+            << '\n'
+            << "  Cleanup buffers: framebuffer release complete\n"
+            << "Lifecycle: " << pipelineStateName(controller.state()) << '\n';
+    } catch (const PipelineFailure&) {
+        controller.fail();
+        throw;
+    } catch (const std::exception& error) {
+        controller.fail();
+        std::cerr << "Lifecycle: "
+                  << pipelineStateName(controller.state())
+                  << " domain=" << failureDomainName(failure_domain) << '\n'
+                  << "Cleanup: RAII rollback executed; external resource audit "
+                     "is required\n";
+        throw PipelineFailure(
+            failure_domain,
+            failureExitCode(failure_domain),
+            std::string(failureDomainName(failure_domain)) +
+                " failure: " + error.what());
     }
 }
 
@@ -615,10 +1229,23 @@ int main(int argc, char* argv[])
             }
         }
         runStream(parseOptions(argc, argv));
-        return EXIT_SUCCESS;
-    } catch (const std::exception& error) {
+        return static_cast<int>(WorkerExitCode::Success);
+    } catch (const std::invalid_argument& error) {
         std::cerr << "camera_display_stream: " << error.what() << '\n';
         std::cerr << "Try '" << argv[0] << " --help' for usage.\n";
-        return EXIT_FAILURE;
+        return static_cast<int>(WorkerExitCode::Usage);
+    } catch (const PipelineFailure& error) {
+        std::cerr << "camera_display_stream: " << error.what() << '\n'
+                  << "Failure domain: "
+                  << failureDomainName(error.domain()) << '\n'
+                  << "Exit code: "
+                  << static_cast<int>(error.exitCode()) << '\n';
+        return static_cast<int>(error.exitCode());
+    } catch (const std::exception& error) {
+        std::cerr << "camera_display_stream: " << error.what() << '\n';
+        std::cerr << "Failure domain: internal\n"
+                  << "Exit code: "
+                  << static_cast<int>(WorkerExitCode::Internal) << '\n';
+        return static_cast<int>(WorkerExitCode::Internal);
     }
 }

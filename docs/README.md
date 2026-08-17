@@ -11,7 +11,11 @@
    V4L2 -> DMA-BUF -> RGA -> DRM 双缓冲链路。
 3. [工业化、Atomic KMS 与异步流水线](industrial_camera_service_atomic_async.md)：理解
    当前 demo 的工程化缺口和后续路线。
-4. [项目总体架构](architecture.md)：查看更长期的 direct-scanout 目标和模块划分。
+4. [长期 worker 与确定性退出](camera_worker_lifecycle.md)：查看 0.11.0 已完成的第一步
+   工业化实现和实板验收。
+5. [V4L2 采集流局部恢复](capture_stream_recovery.md)：理解 0.12.0 的 L1 stream
+   recovery、恢复预算和故障注入。
+6. [项目总体架构](architecture.md)：查看更长期的 direct-scanout 目标和模块划分。
 
 ## 当前已实板验证
 
@@ -20,6 +24,8 @@
 - [离线 NV12 经 RGA 写入 DRM](rga_drm_test.md)
 - [真实相机单帧显示](camera_display_once.md)
 - [真实相机连续同步显示](camera_display_stream.md)
+- [长期 worker、退出码与 SIGTERM 清理](camera_worker_lifecycle.md)
+- [V4L2 采集超时、L1 stream recovery 与恢复预算](capture_stream_recovery.md)
 
 ## 构建、部署与板端运维
 
@@ -36,4 +42,3 @@
 ## 开发机测试
 
 - [vivid/vimc 虚拟摄像头测试](virtual_camera_testing.md)
-

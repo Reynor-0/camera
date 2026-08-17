@@ -31,7 +31,8 @@ Sensor / ISP
 - 当前没有 CPU `memcpy` 整帧图像，但 RGA 会把 NV12 转换并写入另一块 DRM 内存；
 - 当前已经能响应 `SIGINT/SIGTERM`、执行 `STREAMOFF`、等待 page-flip event 并释放
   DRM/V4L2 资源；
-- 当前遇到不可恢复错误时会退出，没有自动重建设备、限速重试、健康检查或进程守护；
+- 当前已能有预算地重启 V4L2 capture stream；stream 本身恢复失败、其他故障域或预算
+  耗尽时仍会退出，尚无设备 session 重建、健康检查或进程守护；
 - Atomic KMS 的核心是“把一组显示状态作为一个事务验证和提交”，它不等于异步；
 - 异步流水线的核心是“允许不同硬件阶段并行处理不同帧”，它也不等于多线程；
 - 下一步不应直接把所有功能同时异步化，应该先把同步 demo 改造成生命周期清楚、能够
@@ -106,7 +107,7 @@ VIDIOC_QBUF：立即把源 capture buffer 归还 ISP
 - `SIGINT`、`SIGTERM` handler 只设置 `sig_atomic_t` 标志，没有在 signal handler
   内执行不安全的 ioctl 或内存释放；
 - V4L2 `poll()` 被信号中断时会返回主循环检查退出标志；
-- 连续 3 次采集超时会判定为错误，而不是永久卡住；
+- 连续 3 次采集超时会尝试一次有预算的 V4L2 STREAMOFF/QBUF/STREAMON 恢复；
 - V4L2 `POLLERR/POLLHUP/POLLNVAL` 会被报告；
 - `V4L2_BUF_FLAG_ERROR` 帧会被丢弃并重新 QBUF；
 - page flip 同一时刻只允许一个请求在途，并设置 2000 ms 超时；
@@ -121,7 +122,7 @@ VIDIOC_QBUF：立即把源 capture buffer 归还 ISP
 | 维度 | 当前 demo | 工业目标 |
 | --- | --- | --- |
 | 运行时间 | 命令行限定 1..3600 秒 | 可持续运行，直到收到停止命令 |
-| 故障策略 | 抛异常并退出 | 先局部恢复，超过预算才重启进程 |
+| 故障策略 | capture 超时已有 L1 恢复；其他域仍退出 | 先逐域恢复，超过预算才重启进程 |
 | 进程守护 | 无 | worker 崩溃后受控拉起 |
 | 重试方式 | 基本无重试 | 有上限、退避和熔断 |
 | 健康状态 | 结束时打印统计 | 持续输出心跳、帧率、超时和恢复次数 |
@@ -782,7 +783,7 @@ camera-display-supervisor
 
 ## 14. 建议的开发阶段
 
-### 阶段 I：长期运行和确定性退出
+### 阶段 I：长期运行和确定性退出（0.11.0 已实现）
 
 先不改变图像算法和 KMS 接口：
 
@@ -795,7 +796,12 @@ camera-display-supervisor
 
 验收：任何初始化步骤失败和任意正常停止点都不残留 DRM client、video stream 或 fd。
 
-### 阶段 II：同步模式下的局部恢复
+当前已实现 `--run-forever`、生命周期状态、SIGINT/SIGTERM 正常清理、故障域退出码和
+1..1000 次可配置的 ADB 验收工具；本次实板完成 3 轮重复 SIGTERM 测试。实现与实板
+记录见[Camera Worker 长期运行与确定性退出](camera_worker_lifecycle.md)。1000 轮和
+24/72 小时测试仍属于压力/长稳验收，不能由 3 轮功能测试替代。
+
+### 阶段 II：同步模式下的局部恢复（L1 已在 0.12.0 实现）
 
 - 单坏帧丢弃；
 - 连续超时后执行 V4L2 stream restart；
@@ -805,6 +811,12 @@ camera-display-supervisor
 - 恢复期间显示最后一帧、黑帧或故障图，策略必须明确。
 
 验收：人工制造短暂断流后能恢复，永久故障不会忙循环或刷爆日志。
+
+当前 0.12.0 已实现连续 3 次采集超时后的
+`STREAMOFF -> QBUF all -> STREAMON`、60 秒最多 3 次的滑动窗口预算、恢复状态日志和
+用户态故障注入验收。L2 V4L2 session rebuild、DRM session recovery 和真实硬件断流
+验收仍未实现，不能把 L1 完成等同于整个阶段 II 完成。实现说明见
+[V4L2 采集流局部恢复](capture_stream_recovery.md)。
 
 ### 阶段 III：Atomic KMS 同步后端
 
@@ -911,20 +923,21 @@ camera-display-supervisor
 
 ## 17. 对当前项目下一步的明确建议
 
-最合适的下一个小阶段不是立即实现全异步，而是：
+阶段 I 的长期运行、确定性退出和稳定退出码已经在 0.11.0 完成；阶段 II 的第一步
+V4L2 L1 stream recovery 和时间窗口预算已在 0.12.0 完成。最合适的下一个小阶段仍
+不是立即实现全异步，而是继续完成：
 
 ```text
-把 camera_display_stream 从“定时 demo”重构为“可长期运行的同步 worker”
+在同步 worker 中加入分级的 V4L2/DRM 局部故障恢复
 ```
 
-第一批开发任务应限制在：
+后续开发任务应限制在：
 
-1. `--run-forever` 和明确的 stop reason；
-2. `PipelineController` 状态与统一清理入口；
-3. V4L2 stream 的一次受控重启；
-4. 分类错误、退出码和恢复统计；
-5. SIGTERM、连续超时、初始化中途失败的自动测试；
-6. 1000 次启动/停止资源泄漏验收。
+1. stream 重启失败后的 V4L2 session 重建；
+2. V4L2 session 重建的指数退避和独立预算；
+3. page flip 失败后的 DRM session 重建；
+4. 最近恢复原因、最后成功帧时间和周期健康状态；
+5. 真实断流、设备消失和 session rebuild 失败注入测试。
 
 完成后再做 Atomic KMS 同步迁移。这样即使 Atomic 开发期间出现配置或驱动错误，也有
 成熟的退出和恢复框架承接，而不会把显示状态机、异步 fence 和服务守护一次混在一起。
@@ -932,6 +945,7 @@ camera-display-supervisor
 ## 18. 相关文档
 
 - [当前连续同步显示实现](camera_display_stream.md)
+- [V4L2 采集流局部恢复](capture_stream_recovery.md)
 - [DRM legacy modeset 与 page flip](drm_probe.md)
 - [摄像头到 DSI 的硬件/软件完整链路](rk3568_camera_to_dsi_pipeline.md)
 - [项目总体架构](architecture.md)

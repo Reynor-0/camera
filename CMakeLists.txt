@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(camera_demo VERSION 0.10.0 LANGUAGES CXX)
+project(camera_demo VERSION 0.12.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

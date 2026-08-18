@@ -3,9 +3,9 @@
 # Usage (run in WSL after deploying the project to the RK3568 board):
 #   ADB=/home/reynor/tools/platform-tools/adb ./tools/test_camera_capture_recovery_rk3568.sh [/dev/videoN] [color-mode]
 #
-# 本脚本通过 ADB 运行一次“恢复成功”和一次“恢复预算耗尽”诊断。要求板端已停止
-# Weston/systemui/vendor camera，要求 root；脚本不修改启动配置，也不会自动恢复桌面。
-# 若测试中断，EXIT trap 只会终止本脚本确认不存在旧 worker 后启动的测试 worker。
+# 本脚本通过 ADB 验证 L1 stream recovery、L2 session rebuild 及两级恢复预算。要求
+# 板端已停止 Weston/systemui/vendor camera，要求 root；脚本不修改启动配置，也不会
+# 自动恢复桌面。若测试中断，EXIT trap 只终止本脚本确认无旧 worker 后启动的 worker。
 
 set -euo pipefail
 
@@ -132,16 +132,22 @@ run_case()
     local case_name="$1"
     local duration_seconds="$2"
     local injected_recoveries="$3"
-    local expected_status="$4"
+    local injected_l1_failures="$4"
+    local expected_status="$5"
     local board_log="${board_log_directory}/capture-recovery-${case_name}.log"
+    local diagnostic_arguments="--inject-capture-timeout-recoveries ${injected_recoveries}"
     local status_output
     local remote_status
+
+    if [[ "${injected_l1_failures}" -gt 0 ]]; then
+        diagnostic_arguments+=" --inject-stream-recovery-failures ${injected_l1_failures}"
+    fi
 
     echo "Capture recovery case ${case_name}: starting..."
     active_test_worker=1
     status_output="$(
         "${adb_args[@]}" shell \
-            "${board_program} --stream ${duration_seconds} --confirm-desktop-stopped --color-mode ${color_mode} --inject-capture-timeout-recoveries ${injected_recoveries} ${video_device} /dev/dri/card0 >${board_log} 2>&1; result=\$?; echo __status=\$result"
+            "${board_program} --stream ${duration_seconds} --confirm-desktop-stopped --color-mode ${color_mode} ${diagnostic_arguments} ${video_device} /dev/dri/card0 >${board_log} 2>&1; result=\$?; echo __status=\$result"
     )"
     active_test_worker=0
     remote_status="$(
@@ -157,7 +163,7 @@ run_case()
     echo "Capture recovery case ${case_name}: process/resource result PASS (${board_log})"
 }
 
-run_case success 4 1 0
+run_case success 4 1 0 0
 success_log="$(
     "${adb_args[@]}" shell \
         "cat ${board_log_directory}/capture-recovery-success.log" |
@@ -171,7 +177,7 @@ if ! grep -Fq "Recovery capture: SUCCEEDED level=L1 attempt=1" <<<"${success_log
     exit 1
 fi
 
-run_case budget-exhausted 10 4 20
+run_case budget-exhausted 10 4 0 20
 budget_log="$(
     "${adb_args[@]}" shell \
         "cat ${board_log_directory}/capture-recovery-budget-exhausted.log" |
@@ -189,4 +195,38 @@ if [[ "${success_count}" -ne 3 ]] ||
     exit 1
 fi
 
-echo "RK3568 capture recovery test passed: L1 success and bounded failure verified."
+run_case session-success 4 1 1 0
+session_success_log="$(
+    "${adb_args[@]}" shell \
+        "cat ${board_log_directory}/capture-recovery-session-success.log" |
+        tr -d '\r'
+)"
+if ! grep -Fq "Recovery capture: FAILED level=L1 attempt=1" <<<"${session_success_log}" ||
+   ! grep -Fq "Recovery capture: SUCCEEDED level=L2 attempt=1 generation=2" <<<"${session_success_log}" ||
+   ! grep -Fq "Recovery capture: VALIDATED level=L2 generation=2" <<<"${session_success_log}" ||
+   ! grep -Fq "Capture session recoveries: attempted=1 succeeded=1 failed=0 budget_exhausted=0" <<<"${session_success_log}" ||
+   ! grep -Fq "Lifecycle: STOPPED" <<<"${session_success_log}"; then
+    echo "error: successful L2 session recovery log is missing required markers" >&2
+    printf '%s\n' "${session_success_log}" >&2
+    exit 1
+fi
+
+run_case session-budget-exhausted 10 3 3 20
+session_budget_log="$(
+    "${adb_args[@]}" shell \
+        "cat ${board_log_directory}/capture-recovery-session-budget-exhausted.log" |
+        tr -d '\r'
+)"
+session_success_count="$(
+    grep -Fc "Recovery capture: SUCCEEDED level=L2" <<<"${session_budget_log}" || true
+)"
+if [[ "${session_success_count}" -ne 2 ]] ||
+   ! grep -Fq "Recovery capture: BUDGET_EXHAUSTED level=L2" <<<"${session_budget_log}" ||
+   ! grep -Fq "Lifecycle: FAILED domain=capture" <<<"${session_budget_log}" ||
+   ! grep -Fq "Exit code: 20" <<<"${session_budget_log}"; then
+    echo "error: L2 session budget exhaustion log is missing required markers" >&2
+    printf '%s\n' "${session_budget_log}" >&2
+    exit 1
+fi
+
+echo "RK3568 capture recovery test passed: L1/L2 success and bounded failure verified."

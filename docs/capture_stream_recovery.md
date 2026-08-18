@@ -191,15 +191,16 @@ QBUF/STREAMON 并继续出帧，但还没有覆盖物理断开 Sensor 或 CSI �
 
 ## 7. 本阶段明确没有实现什么
 
-0.12.0 是阶段 II 的 L1 子阶段，不应被误认为完整自动恢复：
+0.12.0 是阶段 II 的 L1 子阶段，不应被误认为完整自动恢复。后续 0.13.0 已加入
+[V4L2 CaptureSession 会话重建](capture_session_recovery.md)，但下列完整工业能力仍
+没有全部实现：
 
-- STREAMOFF、QBUF 或 STREAMON 本身失败时，还不会重开 `/dev/video0`；
-- `ENODEV/EIO/EPIPE` 还不会进入 WaitingForDevice 或 L2 session rebuild；
+- STREAMOFF、QBUF 或 STREAMON 失败现在会重开 `/dev/video0`，但替代 session 首次
+  创建失败后不会在当前 worker 中持续等待设备；
+- `ENODEV/EIO/EPIPE` 可以触发一次 L2 rebuild，但还没有 WaitingForDevice；
 - RGA 失败仍按 transform 域退出；
 - page flip 失败仍按 display 域退出，不会重建 DRM session；
 - 尚无 supervisor、指数退避、心跳或配置文件；
 - 故障注入验证的是控制面，不替代拔插、断流和 24/72 小时实测。
 
-下一小阶段应把 V4L2 设备、格式和 buffer pool 封装为可销毁重建的
-`CaptureSession`。L1 失败或可识别的 V4L2 设备错误先进入 L2 session rebuild；超过
-L2 预算才让 worker 退出。随后再单独实现 DRM session recovery。
+下一小阶段应单独实现 DRM session recovery。

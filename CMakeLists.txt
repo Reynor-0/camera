@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(camera_demo VERSION 0.12.0 LANGUAGES CXX)
+project(camera_demo VERSION 0.13.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -179,6 +179,7 @@ if(CAMERA_DEMO_BUILD_DRM_PROBE)
                 install(TARGETS camera_display_once RUNTIME DESTINATION bin)
 
                 add_executable(camera_display_stream
+                    src/capture_session.cpp
                     src/v4l2_device.cpp
                     src/v4l2_buffer.cpp
                     src/drm_device.cpp

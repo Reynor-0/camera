@@ -1,3 +1,4 @@
+#include "capture_session.hpp"
 #include "drm_device.hpp"
 #include "drm_display.hpp"
 #include "rga_transform.hpp"
@@ -17,6 +18,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #if !defined(CAMERA_DEMO_VERSION)
@@ -104,6 +106,9 @@ struct Options {
      * 不改变 V4L2 驱动或硬件状态。
      */
     std::uint32_t injected_capture_recoveries{0U};
+
+    /** 诊断模式下人为让 L1 stream recovery 失败的次数；0 表示不注入。 */
+    std::uint32_t injected_stream_recovery_failures{0U};
 };
 
 /** 连续多少次采集超时后执行一次 L1 stream recovery。 */
@@ -117,6 +122,12 @@ const std::size_t kCaptureRecoveryBudgetLimit = 3U;
 
 /** 恢复预算滑动窗口长度，单位秒。 */
 const std::uint32_t kCaptureRecoveryBudgetWindowSeconds = 60U;
+
+/** 60 秒窗口内最多允许的 L2 V4L2 session rebuild 次数。 */
+const std::size_t kCaptureSessionRecoveryBudgetLimit = 2U;
+
+/** L2 session rebuild 的滑动预算窗口，单位秒。 */
+const std::uint32_t kCaptureSessionRecoveryBudgetWindowSeconds = 60U;
 
 /** 两次诊断故障注入之间至少正常显示的帧数。 */
 const std::uint64_t kDiagnosticFramesBetweenRecoveries = 10U;
@@ -189,6 +200,16 @@ public:
 private:
     FailureDomain domain_;
     WorkerExitCode code_;
+};
+
+/** @brief 表示某一级局部恢复已达到时间窗口预算，调用方不得继续升级同一次尝试。 */
+class RecoveryBudgetExhausted : public std::runtime_error {
+public:
+    /** @param detail 包含恢复级别、次数和窗口的诊断文本。 */
+    explicit RecoveryBudgetExhausted(const std::string& detail)
+        : std::runtime_error(detail)
+    {
+    }
 };
 
 /**
@@ -323,6 +344,21 @@ struct StreamStatistics {
     /** 全部成功 L1 recovery 的累计耗时，单位毫秒。 */
     std::uint64_t capture_recovery_total_milliseconds{0U};
 
+    /** 实际开始执行的 L2 capture session rebuild 次数。 */
+    std::uint64_t capture_session_recovery_attempts{0U};
+
+    /** 成功重新 open、分配 buffer 并 STREAMON 的 L2 次数。 */
+    std::uint64_t capture_session_recovery_successes{0U};
+
+    /** 已开始但新 session 创建失败的 L2 次数。 */
+    std::uint64_t capture_session_recovery_failures{0U};
+
+    /** 因 L2 时间窗口预算耗尽而拒绝 rebuild 的次数。 */
+    std::uint64_t capture_session_recovery_budget_exhaustions{0U};
+
+    /** 全部成功 L2 session rebuild 的累计耗时，单位毫秒。 */
+    std::uint64_t capture_session_recovery_total_milliseconds{0U};
+
     /** 根据 V4L2 sequence 发现的缺失帧数。 */
     std::uint64_t sequence_gaps{0U};
 
@@ -348,28 +384,41 @@ struct StreamStatistics {
 };
 
 /**
- * @brief 限制滑动时间窗口内允许发起的 capture stream recovery 次数。
+ * @brief 限制滑动时间窗口内允许发起的某一级恢复次数。
  *
  * 本对象只记录恢复尝试的单调时钟时间，不拥有 V4L2 资源。超过预算时拒绝本次恢复，
- * 由顶层按 capture 故障退出，避免永久硬件故障造成无界 STREAMOFF/ON 忙循环。
+ * 由顶层按对应故障域退出，避免永久硬件故障造成无界恢复忙循环。
  */
-class CaptureRecoveryBudget {
+class RecoveryBudget {
 public:
     /**
+     * @brief 创建一个滑动窗口恢复预算。
+     * @param limit 窗口内允许的最大恢复次数，必须大于 0。
+     * @param window_seconds 滑动窗口长度，单位秒，必须大于 0。
+     * @throws std::invalid_argument 参数为 0 时抛出。
+     */
+    RecoveryBudget(std::size_t limit, std::uint32_t window_seconds)
+        : limit_(limit), window_seconds_(window_seconds)
+    {
+        if (limit_ == 0U || window_seconds_ == 0U) {
+            throw std::invalid_argument(
+                "RecoveryBudget requires a non-zero limit and window");
+        }
+    }
+
+    /**
      * @brief 尝试消费一次恢复预算。
-     * @return 当前 60 秒窗口尚未达到 3 次时记录本次尝试并返回 true；否则返回
-     * false。
+     * @return 当前窗口尚未达到 limit 时记录本次尝试并返回 true；否则返回 false。
      */
     bool tryAcquire()
     {
         const std::chrono::steady_clock::time_point now =
             std::chrono::steady_clock::now();
-        const std::chrono::seconds window(
-            kCaptureRecoveryBudgetWindowSeconds);
+        const std::chrono::seconds window(window_seconds_);
         while (!attempts_.empty() && now - attempts_.front() >= window) {
             attempts_.erase(attempts_.begin());
         }
-        if (attempts_.size() >= kCaptureRecoveryBudgetLimit) {
+        if (attempts_.size() >= limit_) {
             return false;
         }
         attempts_.push_back(now);
@@ -379,7 +428,15 @@ public:
     /** @brief 返回当前滑动窗口内已经消费的恢复次数。 */
     std::size_t attemptsInWindow() const noexcept { return attempts_.size(); }
 
+    /** @brief 返回窗口内最多允许的恢复次数。 */
+    std::size_t limit() const noexcept { return limit_; }
+
+    /** @brief 返回滑动窗口长度，单位秒。 */
+    std::uint32_t windowSeconds() const noexcept { return window_seconds_; }
+
 private:
+    std::size_t limit_;
+    std::uint32_t window_seconds_;
     std::vector<std::chrono::steady_clock::time_point> attempts_;
 };
 
@@ -465,11 +522,11 @@ void printUsage(const char* program, std::ostream& output)
         << "Usage:\n"
         << "  " << program
         << " --stream <seconds> --confirm-desktop-stopped"
-           " [--color-mode MODE] [--inject-capture-timeout-recoveries N]"
+           " [--color-mode MODE] [diagnostic-options]"
            " [video-device] [drm-device]\n"
         << "  " << program
         << " --run-forever --confirm-desktop-stopped"
-           " [--color-mode MODE] [--inject-capture-timeout-recoveries N]"
+           " [--color-mode MODE] [diagnostic-options]"
            " [video-device] [drm-device]\n"
         << "  " << program << " -h | --help\n"
         << "  " << program << " --version\n\n"
@@ -489,7 +546,10 @@ void printUsage(const char* program, std::ostream& output)
         << "Diagnostics:\n"
         << "  --inject-capture-timeout-recoveries N\n"
         << "      inject 1..10 synthetic timeout streaks after normal frames;\n"
-        << "      this verifies recovery control flow without changing hardware.\n\n"
+        << "      this verifies recovery control flow without changing hardware.\n"
+        << "  --inject-stream-recovery-failures N\n"
+        << "      fail 1..10 L1 attempts before STREAMOFF to exercise L2 session\n"
+        << "      rebuild; use with capture timeout recovery injection.\n\n"
         << "Example:\n"
         << "  " << program
         << " --stream 10 --confirm-desktop-stopped --color-mode"
@@ -530,22 +590,22 @@ std::uint32_t parseDuration(const std::string& text)
 }
 
 /**
- * @brief 解析诊断故障注入次数。
+ * @brief 解析 1..10 范围的诊断故障注入次数。
  * @param text 只允许包含十进制数字的参数文本。
+ * @param option_name 用于错误信息的命令行选项名。
  * @return 1..10 范围内的故障注入次数。
  * @throws std::invalid_argument 文本或范围无效时抛出。
  */
-std::uint32_t parseRecoveryInjectionCount(const std::string& text)
+std::uint32_t parseDiagnosticCount(const std::string& text,
+                                   const std::string& option_name)
 {
     if (text.empty()) {
-        throw std::invalid_argument(
-            "capture timeout recovery injection count must not be empty");
+        throw std::invalid_argument(option_name + " must not be empty");
     }
     for (std::size_t index = 0U; index < text.size(); ++index) {
         if (text[index] < '0' || text[index] > '9') {
             throw std::invalid_argument(
-                "capture timeout recovery injection count must contain "
-                "decimal digits only");
+                option_name + " must contain decimal digits only");
         }
     }
 
@@ -554,12 +614,10 @@ std::uint32_t parseRecoveryInjectionCount(const std::string& text)
     try {
         value = std::stoul(text, &consumed, 10);
     } catch (const std::exception&) {
-        throw std::invalid_argument(
-            "capture timeout recovery injection count must be between 1 and 10");
+        throw std::invalid_argument(option_name + " must be between 1 and 10");
     }
     if (consumed != text.size() || value < 1UL || value > 10UL) {
-        throw std::invalid_argument(
-            "capture timeout recovery injection count must be between 1 and 10");
+        throw std::invalid_argument(option_name + " must be between 1 and 10");
     }
     return static_cast<std::uint32_t>(value);
 }
@@ -642,6 +700,7 @@ Options parseOptions(int argc, char* argv[])
 
     bool color_mode_seen = false;
     bool recovery_injection_seen = false;
+    bool stream_failure_injection_seen = false;
     bool have_video_device = false;
     bool have_drm_device = false;
     for (int index = next_argument; index < argc; ++index) {
@@ -667,7 +726,20 @@ Options parseOptions(int argc, char* argv[])
             }
             recovery_injection_seen = true;
             options.injected_capture_recoveries =
-                parseRecoveryInjectionCount(argv[++index]);
+                parseDiagnosticCount(
+                    argv[++index],
+                    "--inject-capture-timeout-recoveries");
+        } else if (argument == "--inject-stream-recovery-failures") {
+            if (stream_failure_injection_seen || index + 1 >= argc) {
+                throw std::invalid_argument(
+                    "--inject-stream-recovery-failures requires one value "
+                    "and may appear only once");
+            }
+            stream_failure_injection_seen = true;
+            options.injected_stream_recovery_failures =
+                parseDiagnosticCount(
+                    argv[++index],
+                    "--inject-stream-recovery-failures");
         } else if (argument.size() >= 2U &&
                    argument[0U] == '-' && argument[1U] == '-') {
             throw std::invalid_argument("unknown option: " + argument);
@@ -824,13 +896,15 @@ void updateStatistics(const CapturedFrame& frame,
  * @param queue 当前处于 Streaming 状态的 capture queue。
  * @param budget 当前进程的恢复预算，不能为空。
  * @param statistics 当前运行统计，不能为空。
+ * @param inject_failure true 时在修改 queue 前注入一次诊断失败。
  * @throws std::invalid_argument 输出对象为空时抛出。
  * @throws std::runtime_error 预算耗尽，或 STREAMOFF/QBUF/STREAMON 任一步失败时
  * 抛出。
  */
 void recoverCaptureStream(V4L2BufferQueue& queue,
-                          CaptureRecoveryBudget* budget,
-                          StreamStatistics* statistics)
+                          RecoveryBudget* budget,
+                          StreamStatistics* statistics,
+                          bool inject_failure)
 {
     if (budget == nullptr || statistics == nullptr) {
         throw std::invalid_argument(
@@ -840,13 +914,13 @@ void recoverCaptureStream(V4L2BufferQueue& queue,
         ++statistics->capture_recovery_budget_exhaustions;
         std::cerr
             << "Recovery capture: BUDGET_EXHAUSTED level=L1 window_seconds="
-            << kCaptureRecoveryBudgetWindowSeconds
-            << " limit=" << kCaptureRecoveryBudgetLimit << '\n';
-        throw std::runtime_error(
+            << budget->windowSeconds()
+            << " limit=" << budget->limit() << '\n';
+        throw RecoveryBudgetExhausted(
             "capture stream recovery budget exhausted: " +
-            std::to_string(kCaptureRecoveryBudgetLimit) +
+            std::to_string(budget->limit()) +
             " attempts in " +
-            std::to_string(kCaptureRecoveryBudgetWindowSeconds) +
+            std::to_string(budget->windowSeconds()) +
             " seconds");
     }
 
@@ -859,6 +933,10 @@ void recoverCaptureStream(V4L2BufferQueue& queue,
               << budget->attemptsInWindow() << '\n';
 
     try {
+        if (inject_failure) {
+            throw std::runtime_error(
+                "diagnostic injected L1 stream recovery failure");
+        }
         queue.stop();
         queue.queueAll();
         queue.start();
@@ -884,6 +962,111 @@ void recoverCaptureStream(V4L2BufferQueue& queue,
 }
 
 /**
+ * @brief 销毁并重新创建完整 V4L2 fd、格式、buffer pool 和 streaming queue。
+ *
+ * L2 比 L1 成本更高，只在 L1 失败后执行。每次尝试受独立滑动窗口预算限制，并按
+ * 当前窗口内第几次尝试等待 200 ms、400 ms 的短退避。CaptureSession 会先销毁旧
+ * queue/fd，再创建替代 session；DRM/RGA 不变，VOP 继续扫描最后一帧。
+ *
+ * @param session 当前 capture session；成功后 generation 增加且 queue 已 STREAMON。
+ * @param budget L2 独立恢复预算，不能为空。
+ * @param statistics 当前运行统计，不能为空。
+ * @param cause 触发升级恢复的 L1 或 V4L2 错误文本。
+ * @throws std::invalid_argument 输出对象为空时抛出。
+ * @throws std::runtime_error 预算耗尽或新 session 创建失败时抛出。
+ */
+void recoverCaptureSession(CaptureSession& session,
+                           RecoveryBudget* budget,
+                           StreamStatistics* statistics,
+                           const std::string& cause)
+{
+    if (budget == nullptr || statistics == nullptr) {
+        throw std::invalid_argument(
+            "capture session recovery requires budget and statistics");
+    }
+    if (!budget->tryAcquire()) {
+        ++statistics->capture_session_recovery_budget_exhaustions;
+        std::cerr
+            << "Recovery capture: BUDGET_EXHAUSTED level=L2 window_seconds="
+            << budget->windowSeconds()
+            << " limit=" << budget->limit() << '\n';
+        throw RecoveryBudgetExhausted(
+            "capture session recovery budget exhausted: " +
+            std::to_string(budget->limit()) + " attempts in " +
+            std::to_string(budget->windowSeconds()) + " seconds");
+    }
+
+    ++statistics->capture_session_recovery_attempts;
+    const std::uint64_t attempt =
+        statistics->capture_session_recovery_attempts;
+    const std::uint32_t backoff_milliseconds =
+        budget->attemptsInWindow() == 1U ? 200U : 400U;
+    std::cout << "Recovery capture: STARTING level=L2 attempt=" << attempt
+              << " cause=" << cause
+              << " backoff_ms=" << backoff_milliseconds
+              << " attempts_in_window=" << budget->attemptsInWindow() << '\n';
+
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(backoff_milliseconds));
+    const std::chrono::steady_clock::time_point recovery_start =
+        std::chrono::steady_clock::now();
+    try {
+        session.rebuild();
+    } catch (...) {
+        ++statistics->capture_session_recovery_failures;
+        std::cerr << "Recovery capture: FAILED level=L2 attempt=" << attempt
+                  << '\n';
+        throw;
+    }
+
+    const std::chrono::steady_clock::time_point recovery_end =
+        std::chrono::steady_clock::now();
+    const std::uint64_t elapsed_milliseconds =
+        static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                recovery_end - recovery_start)
+                .count());
+    ++statistics->capture_session_recovery_successes;
+    statistics->capture_session_recovery_total_milliseconds +=
+        elapsed_milliseconds;
+    statistics->sequence_baseline_pending = statistics->have_sequence;
+    std::cout << "Recovery capture: SUCCEEDED level=L2 attempt=" << attempt
+              << " generation=" << session.generation()
+              << " elapsed_ms=" << elapsed_milliseconds << '\n';
+}
+
+/**
+ * @brief 验证新一代 capture session，并更新主循环使用的格式和颜色模式。
+ * @param session 已成功 STREAMON 的新一代 V4L2 session。
+ * @param options 用户选择的自动或强制颜色模式。
+ * @param format 非空输出，成功时接收新 session 的实际格式副本。
+ * @param color_mode 非空输出，成功时接收适用于新格式的 RGA CSC 模式。
+ * @throws std::invalid_argument 输出指针为空时抛出。
+ * @throws std::runtime_error 新 session 格式或颜色元数据不兼容时抛出。
+ */
+void adoptCaptureSessionFormat(const CaptureSession& session,
+                               const Options& options,
+                               VideoFormat* format,
+                               RgaYuvToRgbMode* color_mode)
+{
+    if (format == nullptr || color_mode == nullptr) {
+        throw std::invalid_argument(
+            "capture format adoption requires non-null outputs");
+    }
+    const VideoFormat replacement_format = session.format();
+    validateFormat(replacement_format);
+    const RgaYuvToRgbMode replacement_color_mode = selectColorMode(
+        replacement_format, options.force_color_mode, options.color_mode);
+    *format = replacement_format;
+    *color_mode = replacement_color_mode;
+    std::cout << "Recovery capture: VALIDATED level=L2 generation="
+              << session.generation()
+              << " size=" << format->width << 'x' << format->height
+              << " stride=" << format->bytes_per_line[0U]
+              << " color_mode=" << colorModeName(*color_mode) << '\n';
+}
+
+/**
  * @brief 执行连续 V4L2 DMA-BUF 到双 DRM framebuffer 的同步流水线。
  * @param options 已通过命令行范围校验的配置。
  */
@@ -902,27 +1085,24 @@ void runStream(const Options& options)
         SignalHandlerGuard signal_handlers;
 
         failure_domain = FailureDomain::Capture;
-        V4L2Device camera(options.video_device);
-        VideoColorMetadata requested_color;
-        requested_color.colorspace = V4L2_COLORSPACE_REC709;
-        requested_color.xfer_func = V4L2_XFER_FUNC_709;
-        requested_color.ycbcr_enc = V4L2_YCBCR_ENC_709;
-        requested_color.quantization = V4L2_QUANTIZATION_LIM_RANGE;
-        const VideoFormat format = camera.setFormat(source_width,
-                                                    source_height,
-                                                    V4L2_PIX_FMT_NV12,
-                                                    requested_color);
+        CaptureSessionConfig capture_config;
+        capture_config.device_path = options.video_device;
+        capture_config.width = source_width;
+        capture_config.height = source_height;
+        capture_config.pixel_format = V4L2_PIX_FMT_NV12;
+        capture_config.buffer_count = 4U;
+        capture_config.requested_color.colorspace = V4L2_COLORSPACE_REC709;
+        capture_config.requested_color.xfer_func = V4L2_XFER_FUNC_709;
+        capture_config.requested_color.ycbcr_enc = V4L2_YCBCR_ENC_709;
+        capture_config.requested_color.quantization =
+            V4L2_QUANTIZATION_LIM_RANGE;
+        CaptureSession capture(capture_config);
+        VideoFormat format = capture.format();
 
         failure_domain = FailureDomain::Configuration;
         validateFormat(format);
-        const RgaYuvToRgbMode color_mode = selectColorMode(
+        RgaYuvToRgbMode color_mode = selectColorMode(
             format, options.force_color_mode, options.color_mode);
-
-        failure_domain = FailureDomain::Capture;
-        V4L2BufferQueue queue(camera, format);
-        queue.requestBuffers(4U);
-        queue.exportDmaBuffers();
-        queue.queueAll();
 
         failure_domain = FailureDomain::Display;
         DrmDevice drm(options.drm_device);
@@ -964,18 +1144,23 @@ void runStream(const Options& options)
                                true);
 
         failure_domain = FailureDomain::Capture;
-        queue.start();
         controller.beginRunning(options.run_forever,
                                 options.duration_seconds);
         std::cout << "Lifecycle: "
                   << pipelineStateName(controller.state()) << '\n';
 
         StreamStatistics statistics;
-        CaptureRecoveryBudget capture_recovery_budget;
+        RecoveryBudget capture_recovery_budget(
+            kCaptureRecoveryBudgetLimit,
+            kCaptureRecoveryBudgetWindowSeconds);
+        RecoveryBudget capture_session_recovery_budget(
+            kCaptureSessionRecoveryBudgetLimit,
+            kCaptureSessionRecoveryBudgetWindowSeconds);
         std::size_t writable_framebuffer = 0U;
         bool display_active = false;
         std::uint32_t consecutive_timeouts = 0U;
         std::uint32_t diagnostic_recoveries_completed = 0U;
+        std::uint32_t diagnostic_stream_failures_completed = 0U;
         std::uint64_t next_diagnostic_injection_frame =
             kDiagnosticFramesBetweenRecoveries;
         bool diagnostic_timeout_streak_active = false;
@@ -985,7 +1170,8 @@ void runStream(const Options& options)
             << "  Camera: " << options.video_device << '\n'
             << "  Source: 1920x1080 NV12, stride="
             << format.bytes_per_line[0U] << " bytes\n"
-            << "  Capture buffers: " << queue.bufferCount() << '\n'
+            << "  Capture buffers: " << capture.queue().bufferCount() << '\n'
+            << "  Capture session generation: " << capture.generation() << '\n'
             << "  Color metadata: colorspace=" << format.colorspace
             << " xfer=" << format.xfer_func
             << " ycbcr=" << format.ycbcr_enc
@@ -1003,8 +1189,13 @@ void runStream(const Options& options)
             << kCapturePollTimeoutMilliseconds << " ms; limit="
             << kCaptureRecoveryBudgetLimit << " per "
             << kCaptureRecoveryBudgetWindowSeconds << " seconds\n"
+            << "  Capture session recovery: limit="
+            << kCaptureSessionRecoveryBudgetLimit << " per "
+            << kCaptureSessionRecoveryBudgetWindowSeconds << " seconds\n"
             << "  Diagnostic recovery injections: "
             << options.injected_capture_recoveries << '\n'
+            << "  Diagnostic L1 failure injections: "
+            << options.injected_stream_recovery_failures << '\n'
             << "  Run limit: ";
         if (options.run_forever) {
             std::cout << "forever (until SIGINT/SIGTERM)\n";
@@ -1027,10 +1218,24 @@ void runStream(const Options& options)
                     << statistics.displayed_frames << '\n';
             }
 
-            const bool frame_ready = diagnostic_timeout_streak_active
-                                         ? false
-                                         : queue.waitForFrame(
-                                               kCapturePollTimeoutMilliseconds);
+            bool frame_ready = false;
+            try {
+                frame_ready = diagnostic_timeout_streak_active
+                                  ? false
+                                  : capture.queue().waitForFrame(
+                                        kCapturePollTimeoutMilliseconds);
+            } catch (const std::exception& capture_error) {
+                recoverCaptureSession(capture,
+                                      &capture_session_recovery_budget,
+                                      &statistics,
+                                      capture_error.what());
+                failure_domain = FailureDomain::Configuration;
+                adoptCaptureSessionFormat(
+                    capture, options, &format, &color_mode);
+                failure_domain = FailureDomain::Capture;
+                consecutive_timeouts = 0U;
+                continue;
+            }
             if (!frame_ready) {
                 // poll 被停止信号打断时不把正常关机误计为采集超时。
                 if (!controller.shouldContinue()) {
@@ -1040,9 +1245,29 @@ void runStream(const Options& options)
                 ++consecutive_timeouts;
                 if (consecutive_timeouts >=
                     kCaptureTimeoutRecoveryThreshold) {
-                    recoverCaptureStream(queue,
-                                         &capture_recovery_budget,
-                                         &statistics);
+                    const bool inject_l1_failure =
+                        diagnostic_stream_failures_completed <
+                        options.injected_stream_recovery_failures;
+                    try {
+                        recoverCaptureStream(capture.queue(),
+                                             &capture_recovery_budget,
+                                             &statistics,
+                                             inject_l1_failure);
+                    } catch (const RecoveryBudgetExhausted&) {
+                        throw;
+                    } catch (const std::exception& l1_error) {
+                        if (inject_l1_failure) {
+                            ++diagnostic_stream_failures_completed;
+                        }
+                        recoverCaptureSession(capture,
+                                              &capture_session_recovery_budget,
+                                              &statistics,
+                                              l1_error.what());
+                        failure_domain = FailureDomain::Configuration;
+                        adoptCaptureSessionFormat(
+                            capture, options, &format, &color_mode);
+                        failure_domain = FailureDomain::Capture;
+                    }
                     consecutive_timeouts = 0U;
                     if (diagnostic_timeout_streak_active) {
                         ++diagnostic_recoveries_completed;
@@ -1056,16 +1281,54 @@ void runStream(const Options& options)
             }
 
             CapturedFrame frame;
-            if (!queue.tryDequeue(&frame)) {
+            try {
+                if (!capture.queue().tryDequeue(&frame)) {
+                    continue;
+                }
+            } catch (const std::exception& capture_error) {
+                recoverCaptureSession(capture,
+                                      &capture_session_recovery_budget,
+                                      &statistics,
+                                      capture_error.what());
+                failure_domain = FailureDomain::Configuration;
+                adoptCaptureSessionFormat(
+                    capture, options, &format, &color_mode);
+                failure_domain = FailureDomain::Capture;
+                consecutive_timeouts = 0U;
                 continue;
             }
             consecutive_timeouts = 0U;
             if ((frame.flags & V4L2_BUF_FLAG_ERROR) != 0U) {
                 ++statistics.error_frames;
-                queue.requeue(frame.buffer_index);
+                try {
+                    capture.queue().requeue(frame.buffer_index);
+                } catch (const std::exception& capture_error) {
+                    recoverCaptureSession(capture,
+                                          &capture_session_recovery_budget,
+                                          &statistics,
+                                          capture_error.what());
+                    failure_domain = FailureDomain::Configuration;
+                    adoptCaptureSessionFormat(
+                        capture, options, &format, &color_mode);
+                    failure_domain = FailureDomain::Capture;
+                }
                 continue;
             }
-            validateCapturedFrame(frame, format);
+            try {
+                validateCapturedFrame(frame, format);
+            } catch (const std::exception& capture_error) {
+                // metadata 无效时当前 DQBUF buffer 的可复用性不可证明。销毁整个
+                // session 比尝试 QBUF 一个布局未知的 buffer 更安全。
+                recoverCaptureSession(capture,
+                                      &capture_session_recovery_budget,
+                                      &statistics,
+                                      capture_error.what());
+                failure_domain = FailureDomain::Configuration;
+                adoptCaptureSessionFormat(
+                    capture, options, &format, &color_mode);
+                failure_domain = FailureDomain::Capture;
+                continue;
+            }
 
             failure_domain = FailureDomain::Transform;
             DrmDumbFramebuffer& target = *framebuffers[writable_framebuffer];
@@ -1087,7 +1350,19 @@ void runStream(const Options& options)
             failure_domain = FailureDomain::Internal;
             updateStatistics(frame, transform, &statistics);
             failure_domain = FailureDomain::Capture;
-            queue.requeue(frame.buffer_index);
+            try {
+                capture.queue().requeue(frame.buffer_index);
+            } catch (const std::exception& capture_error) {
+                recoverCaptureSession(capture,
+                                      &capture_session_recovery_budget,
+                                      &statistics,
+                                      capture_error.what());
+                failure_domain = FailureDomain::Configuration;
+                adoptCaptureSessionFormat(
+                    capture, options, &format, &color_mode);
+                failure_domain = FailureDomain::Capture;
+                continue;
+            }
 
             failure_domain = FailureDomain::Display;
             if (!display_active) {
@@ -1119,7 +1394,7 @@ void runStream(const Options& options)
         }
 
         failure_domain = FailureDomain::Capture;
-        queue.stop();
+        capture.queue().stop();
         const std::uint64_t completed_flips = display.completedFlipCount();
 
         failure_domain = FailureDomain::Display;
@@ -1167,6 +1442,16 @@ void runStream(const Options& options)
             << statistics.capture_recovery_budget_exhaustions << '\n'
             << "  Capture recovery total ms: "
             << statistics.capture_recovery_total_milliseconds << '\n'
+            << "  Capture session recoveries: attempted="
+            << statistics.capture_session_recovery_attempts
+            << " succeeded=" << statistics.capture_session_recovery_successes
+            << " failed=" << statistics.capture_session_recovery_failures
+            << " budget_exhausted="
+            << statistics.capture_session_recovery_budget_exhaustions << '\n'
+            << "  Capture session recovery total ms: "
+            << statistics.capture_session_recovery_total_milliseconds << '\n'
+            << "  Final capture session generation: "
+            << capture.generation() << '\n'
             << "  Sequence gaps: " << statistics.sequence_gaps << '\n';
         if (statistics.have_sequence) {
             std::cout << "  Sequence range: " << statistics.first_sequence

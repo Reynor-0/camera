@@ -18,3 +18,4 @@ RKISP V4L2 -> DMA-BUF -> RGA -> 双 DRM framebuffer
 - [当前连续显示实现](docs/camera_display_stream.md)
 - [0.11.0 长期 worker 与确定性退出](docs/camera_worker_lifecycle.md)
 - [0.12.0 V4L2 采集流局部恢复](docs/capture_stream_recovery.md)
+- [0.13.0 V4L2 CaptureSession 会话重建](docs/capture_session_recovery.md)

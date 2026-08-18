@@ -801,7 +801,7 @@ camera-display-supervisor
 记录见[Camera Worker 长期运行与确定性退出](camera_worker_lifecycle.md)。1000 轮和
 24/72 小时测试仍属于压力/长稳验收，不能由 3 轮功能测试替代。
 
-### 阶段 II：同步模式下的局部恢复（L1 已在 0.12.0 实现）
+### 阶段 II：同步模式下的局部恢复（L1/L2 已分别在 0.12/0.13 实现）
 
 - 单坏帧丢弃；
 - 连续超时后执行 V4L2 stream restart；
@@ -814,9 +814,10 @@ camera-display-supervisor
 
 当前 0.12.0 已实现连续 3 次采集超时后的
 `STREAMOFF -> QBUF all -> STREAMON`、60 秒最多 3 次的滑动窗口预算、恢复状态日志和
-用户态故障注入验收。L2 V4L2 session rebuild、DRM session recovery 和真实硬件断流
-验收仍未实现，不能把 L1 完成等同于整个阶段 II 完成。实现说明见
-[V4L2 采集流局部恢复](capture_stream_recovery.md)。
+用户态故障注入验收。0.13.0 进一步实现 L1 失败后的 V4L2 session rebuild、L2 独立
+预算和短退避。DRM session recovery 和真实硬件断流验收仍未实现，阶段 II 尚未全部
+完成。实现说明见[V4L2 采集流局部恢复](capture_stream_recovery.md)和
+[V4L2 CaptureSession 会话重建](capture_session_recovery.md)。
 
 ### 阶段 III：Atomic KMS 同步后端
 
@@ -923,9 +924,9 @@ camera-display-supervisor
 
 ## 17. 对当前项目下一步的明确建议
 
-阶段 I 的长期运行、确定性退出和稳定退出码已经在 0.11.0 完成；阶段 II 的第一步
-V4L2 L1 stream recovery 和时间窗口预算已在 0.12.0 完成。最合适的下一个小阶段仍
-不是立即实现全异步，而是继续完成：
+阶段 I 的长期运行、确定性退出和稳定退出码已经在 0.11.0 完成；阶段 II 的 V4L2 L1
+stream recovery 和 L2 session rebuild 已在 0.12.0/0.13.0 完成。最合适的下一个
+小阶段仍不是立即实现全异步，而是继续完成：
 
 ```text
 在同步 worker 中加入分级的 V4L2/DRM 局部故障恢复
@@ -933,11 +934,10 @@ V4L2 L1 stream recovery 和时间窗口预算已在 0.12.0 完成。最合适的
 
 后续开发任务应限制在：
 
-1. stream 重启失败后的 V4L2 session 重建；
-2. V4L2 session 重建的指数退避和独立预算；
-3. page flip 失败后的 DRM session 重建；
-4. 最近恢复原因、最后成功帧时间和周期健康状态；
-5. 真实断流、设备消失和 session rebuild 失败注入测试。
+1. page flip 失败后的 DRM session 重建；
+2. 最近恢复原因、最后成功帧时间和周期健康状态；
+3. 真实断流、设备消失和 session rebuild 失败注入测试；
+4. WaitingForDevice 与更长时间尺度的外部退避。
 
 完成后再做 Atomic KMS 同步迁移。这样即使 Atomic 开发期间出现配置或驱动错误，也有
 成熟的退出和恢复框架承接，而不会把显示状态机、异步 fence 和服务守护一次混在一起。
@@ -946,6 +946,7 @@ V4L2 L1 stream recovery 和时间窗口预算已在 0.12.0 完成。最合适的
 
 - [当前连续同步显示实现](camera_display_stream.md)
 - [V4L2 采集流局部恢复](capture_stream_recovery.md)
+- [V4L2 CaptureSession 会话重建](capture_session_recovery.md)
 - [DRM legacy modeset 与 page flip](drm_probe.md)
 - [摄像头到 DSI 的硬件/软件完整链路](rk3568_camera_to_dsi_pipeline.md)
 - [项目总体架构](architecture.md)

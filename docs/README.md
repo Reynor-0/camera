@@ -15,7 +15,9 @@
    工业化实现和实板验收。
 5. [V4L2 采集流局部恢复](capture_stream_recovery.md)：理解 0.12.0 的 L1 stream
    recovery、恢复预算和故障注入。
-6. [项目总体架构](architecture.md)：查看更长期的 direct-scanout 目标和模块划分。
+6. [V4L2 CaptureSession 会话重建](capture_session_recovery.md)：理解 0.13.0 的 L2
+   close/open、buffer pool 重建和独立预算。
+7. [项目总体架构](architecture.md)：查看更长期的 direct-scanout 目标和模块划分。
 
 ## 当前已实板验证
 
@@ -26,6 +28,7 @@
 - [真实相机连续同步显示](camera_display_stream.md)
 - [长期 worker、退出码与 SIGTERM 清理](camera_worker_lifecycle.md)
 - [V4L2 采集超时、L1 stream recovery 与恢复预算](capture_stream_recovery.md)
+- [V4L2 L2 CaptureSession rebuild](capture_session_recovery.md)
 
 ## 构建、部署与板端运维
 

@@ -71,6 +71,10 @@ cd /home/reynor/camera-project/scripts
 执行 `STREAMOFF -> QBUF all -> STREAMON`。恢复状态、指标、故障注入和边界见
 [V4L2 采集流局部恢复](capture_stream_recovery.md)。
 
+版本 0.13.0 起，L1 ioctl 失败以及可识别的 V4L2 queue 错误会升级为完整
+`CaptureSession` 重建；资源边界、两级预算和故障注入见
+[V4L2 CaptureSession 会话重建](capture_session_recovery.md)。
+
 脚本停止 systemui、厂商 camera 和 Weston；程序退出后关闭 CRTC，脚本再恢复桌面。
 当前 BSP 报告 BT.709 Full，但板载 librga 不支持该模式，因此本阶段继续用已明确
 授权的 `bt709-limited` 诊断模式推进动态链路，不能把它视为最终颜色结论。

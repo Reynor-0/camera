@@ -17,7 +17,15 @@
    recovery、恢复预算和故障注入。
 6. [V4L2 CaptureSession 会话重建](capture_session_recovery.md)：理解 0.13.0 的 L2
    close/open、buffer pool 重建和独立预算。
-7. [项目总体架构](architecture.md)：查看更长期的 direct-scanout 目标和模块划分。
+7. [RK3568 Camera 常驻进程调试指南](rk3568_camera_debugging_guide.md)：学习应用日志、
+   dmesg、strace、GDB/core、Valgrind/ASan、ftrace、perf 和 Kernel Panic 的分层定位方法。
+8. [倒车影像实战项目设计](reverse_camera_practical_project.md)：在当前实板链路上加入
+   CAN 倒挡控制、无 MCU 模拟、gPTP 时间模型和明确的 DRM 不自主恢复边界。
+9. [停车场车牌识别与 SQLite 入库设计](parking_lot_lpr_project.md)：把持续采集显示基线
+   扩展为 HyperLPR3 低频识别、多帧确认和板端轻量数据库入库系统。
+10. [车载网关与倒车影像共存方案](rk3568_gateway_reverse_camera_project.md)：基于实板
+   CAN、双 Ethernet/PTP、BusyBox 和现有 V4L2/RGA/DRM 能力设计双进程域控制器原型。
+11. [项目总体架构](architecture.md)：查看更长期的 direct-scanout 目标和模块划分。
 
 ## 当前已实板验证
 
@@ -34,10 +42,14 @@
 
 - [交叉编译与部署](cross_compilation_rk3568.md)
 - [开发与代码规范](development_guidelines.md)
+- [RK3568 Camera 常驻进程调试指南](rk3568_camera_debugging_guide.md)
 - [Weston/systemui 开机启动管理](board_desktop_autostart.md)
 
 ## 设计与后续开发
 
+- [RK3568 倒车影像实战项目设计](reverse_camera_practical_project.md)
+- [RK3568 Linux 停车场车牌识别与 SQLite 入库项目设计](parking_lot_lpr_project.md)
+- [RK3568 Linux 车载网关与倒车影像共存技术方案](rk3568_gateway_reverse_camera_project.md)
 - [工业化、Atomic KMS 与异步流水线](industrial_camera_service_atomic_async.md)
 - [项目总体架构](architecture.md)
 - [V4L2 MMAP 连续采集早期计划](v4l2_mmap_capture_plan.md)

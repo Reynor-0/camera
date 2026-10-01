@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 
-# 为 64 位 RK3568 Linux 用户态配置、编译并安装 camera_demo。
+# Usage (run in WSL; root is not required):
+#   ./tools/cross_build_rk3568.sh
+#   ./tools/cross_build_rk3568.sh --help
+#
+# 为 64 位 RK3568 Linux 用户态配置、编译并安装 camera_demo。本脚本只写构建和 staging
+# 目录，不修改 WSL 或开发板系统状态，因此不需要恢复操作。
 #
 # 可选环境变量：
 #   RK3568_CROSS_COMPILE  交叉工具前缀；未设置时优先使用 ATK Buildroot 工具链
@@ -13,6 +18,21 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 project_dir="$(cd "${script_dir}/.." && pwd)"
+
+print_usage()
+{
+    echo "Usage: $0 [--help]"
+    echo "Build and stage all RK3568 product executables with the AArch64 toolchain."
+}
+
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
+    print_usage
+    exit 0
+fi
+if [[ "$#" -ne 0 ]]; then
+    print_usage >&2
+    exit 2
+fi
 
 atk_cross_prefix="/opt/atk-dlrk356x-toolchain/bin/aarch64-buildroot-linux-gnu-"
 if [[ -n "${RK3568_CROSS_COMPILE:-}" ]]; then
@@ -67,6 +87,9 @@ cmake_args=(
     -DRK3568_CROSS_COMPILE="${cross_prefix}"
     -DRK3568_CPU_FLAGS="${cpu_flags}"
     -DCMAKE_INSTALL_PREFIX=/usr/local
+    # 领域单元测试在 WSL 主机通过 CTest 运行；交叉构建不生成一个无法在 WSL 执行、
+    # 且不属于板端产品部署清单的 AArch64 测试程序。
+    -DBUILD_TESTING=OFF
     # 板端正式产物不允许带着编译告警进入部署阶段。
     -DCAMERA_DEMO_WARNINGS_AS_ERRORS=ON
     -DCAMERA_DEMO_REQUIRE_DRM_PROBE=ON
@@ -114,6 +137,18 @@ if [[ ! -f "${camera_display_stream_binary}" ]]; then
     exit 1
 fi
 
+parkingd_binary="${stage_dir}/bin/parkingd"
+if [[ ! -f "${parkingd_binary}" ]]; then
+    echo "error: expected parking daemon was not installed: ${parkingd_binary}" >&2
+    exit 1
+fi
+
+parkingctl_binary="${stage_dir}/bin/parkingctl"
+if [[ ! -f "${parkingctl_binary}" ]]; then
+    echo "error: expected parking control client was not installed: ${parkingctl_binary}" >&2
+    exit 1
+fi
+
 # readelf 来自交叉工具链，不依赖宿主机 file 命令对架构名称的输出格式。
 machine="$("${readelf_tool}" -h "${binary}" | sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')"
 if [[ "${machine}" != *AArch64* ]]; then
@@ -149,6 +184,20 @@ if [[ "${camera_display_stream_machine}" != *AArch64* ]]; then
     exit 1
 fi
 
+parkingd_machine="$("${readelf_tool}" -h "${parkingd_binary}" |
+    sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')"
+if [[ "${parkingd_machine}" != *AArch64* ]]; then
+    echo "error: parkingd is not an AArch64 ELF: ${parkingd_machine}" >&2
+    exit 1
+fi
+
+parkingctl_machine="$("${readelf_tool}" -h "${parkingctl_binary}" |
+    sed -n 's/^[[:space:]]*Machine:[[:space:]]*//p')"
+if [[ "${parkingctl_machine}" != *AArch64* ]]; then
+    echo "error: parkingctl is not an AArch64 ELF: ${parkingctl_machine}" >&2
+    exit 1
+fi
+
 echo "RK3568 build completed."
 echo "  ELF machine: ${machine}"
 echo "  Binary:      ${binary}"
@@ -156,4 +205,6 @@ echo "  DRM probe:   ${drm_probe_binary}"
 echo "  RGA/DRM:     ${rga_drm_test_binary}"
 echo "  Camera/DRM:  ${camera_display_once_binary}"
 echo "  Stream/DRM:  ${camera_display_stream_binary}"
+echo "  Parkingd:    ${parkingd_binary}"
+echo "  Parkingctl:  ${parkingctl_binary}"
 echo "  Deploy with: ./tools/deploy_rk3568.sh"

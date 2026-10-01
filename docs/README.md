@@ -23,9 +23,14 @@
    CAN 倒挡控制、无 MCU 模拟、gPTP 时间模型和明确的 DRM 不自主恢复边界。
 9. [停车场车牌识别与 SQLite 入库设计](parking_lot_lpr_project.md)：把持续采集显示基线
    扩展为 HyperLPR3 低频识别、多帧确认和板端轻量数据库入库系统。
-10. [车载网关与倒车影像共存方案](rk3568_gateway_reverse_camera_project.md)：基于实板
-   CAN、双 Ethernet/PTP、BusyBox 和现有 V4L2/RGA/DRM 能力设计双进程域控制器原型。
-11. [项目总体架构](architecture.md)：查看更长期的 direct-scanout 目标和模块划分。
+10. [AIparking 业务逻辑迁移方案](aiparking_logic_migration_plan.md)：对照旧 C 工程，重构
+    RFID、入/出场、车牌识别、SQLite、计费和播报；支持真实刷卡与手动命令模拟并存，
+    并安全接入现有 Camera 数据面。
+11. [AIparking 迁移实施进度](aiparking_implementation_progress.md)：区分设计目标与已经
+    落地的代码，持续记录每个阶段的验收证据和下一步边界。
+12. [车载网关与倒车影像共存方案](rk3568_gateway_reverse_camera_project.md)：基于实板
+    CAN、双 Ethernet/PTP、BusyBox 和现有 V4L2/RGA/DRM 能力设计双进程域控制器原型。
+13. [项目总体架构](architecture.md)：查看更长期的 direct-scanout 目标和模块划分。
 
 ## 当前已实板验证
 
@@ -42,6 +47,7 @@
 
 - [交叉编译与部署](cross_compilation_rk3568.md)
 - [开发与代码规范](development_guidelines.md)
+- [源码目录与命名规范](source_layout.md)
 - [RK3568 Camera 常驻进程调试指南](rk3568_camera_debugging_guide.md)
 - [Weston/systemui 开机启动管理](board_desktop_autostart.md)
 
@@ -49,6 +55,8 @@
 
 - [RK3568 倒车影像实战项目设计](reverse_camera_practical_project.md)
 - [RK3568 Linux 停车场车牌识别与 SQLite 入库项目设计](parking_lot_lpr_project.md)
+- [AIparking 业务逻辑迁移到 RK3568 Camera 项目的技术方案](aiparking_logic_migration_plan.md)
+- [AIparking 迁移实施进度](aiparking_implementation_progress.md)
 - [RK3568 Linux 车载网关与倒车影像共存技术方案](rk3568_gateway_reverse_camera_project.md)
 - [工业化、Atomic KMS 与异步流水线](industrial_camera_service_atomic_async.md)
 - [项目总体架构](architecture.md)

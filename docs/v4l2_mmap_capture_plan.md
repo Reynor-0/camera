@@ -38,8 +38,8 @@ setFormat
 
 实现位于：
 
-- `inc/v4l2_buffer.hpp`
-- `src/v4l2_buffer.cpp`
+- `inc/camera/capture/buffer.hpp`
+- `src/camera/capture/buffer.cpp`
 
 核心对象为 `V4L2BufferQueue`：
 

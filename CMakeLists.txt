@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(camera_demo VERSION 0.13.0 LANGUAGES CXX)
+project(camera_demo VERSION 0.15.0 LANGUAGES CXX)
+
+include(CTest)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -21,16 +23,216 @@ option(CAMERA_DEMO_BUILD_RGA_DRM_TEST
 option(CAMERA_DEMO_REQUIRE_RGA_DRM_TEST
        "Fail configuration when rga_drm_test dependencies are unavailable" OFF)
 
-add_executable(camera_demo
-    src/main.cpp
-    src/v4l2_buffer.cpp
-    src/v4l2_device.cpp
+add_library(parking_domain STATIC
+    src/parking/domain/card.cpp
+    src/parking/domain/coordinator.cpp
+    src/parking/domain/fee.cpp
+    src/parking/domain/model.cpp
+)
+target_include_directories(parking_domain PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/inc
+)
+target_compile_features(parking_domain PUBLIC cxx_std_11)
+target_compile_options(parking_domain PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+if(CAMERA_DEMO_WARNINGS_AS_ERRORS)
+    target_compile_options(parking_domain PRIVATE -Werror)
+endif()
+
+add_library(parking_recognition STATIC
+    src/parking/recognition/fake.cpp
+)
+target_include_directories(parking_recognition PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/inc
+)
+target_link_libraries(parking_recognition PUBLIC parking_domain)
+target_compile_features(parking_recognition PUBLIC cxx_std_11)
+target_compile_options(parking_recognition PRIVATE -Wall -Wextra -Wpedantic)
+if(CAMERA_DEMO_WARNINGS_AS_ERRORS)
+    target_compile_options(parking_recognition PRIVATE -Werror)
+endif()
+
+# SQLite 是 parkingd 持久化状态的必要依赖。RK3568 交叉构建只允许从 toolchain
+# sysroot 查找；当前 WSL 缺少 libsqlite3-dev 头文件时，允许复用 Buildroot 的稳定
+# SQLite C API 头文件，但仍链接宿主机自己的 x86_64 runtime library。
+find_path(PARKING_SQLITE3_INCLUDE_DIR NAMES sqlite3.h
+    HINTS
+        /opt/atk-dlrk356x-toolchain/aarch64-buildroot-linux-gnu/sysroot/usr/include
+)
+find_library(PARKING_SQLITE3_LIBRARY NAMES sqlite3)
+if(NOT PARKING_SQLITE3_LIBRARY AND NOT CMAKE_CROSSCOMPILING)
+    find_file(PARKING_SQLITE3_LIBRARY NAMES libsqlite3.so.0
+        PATHS
+            /usr/lib/x86_64-linux-gnu
+            /lib/x86_64-linux-gnu
+        NO_DEFAULT_PATH
+    )
+endif()
+if(NOT PARKING_SQLITE3_INCLUDE_DIR OR NOT PARKING_SQLITE3_LIBRARY)
+    message(FATAL_ERROR
+        "parkingd requires sqlite3.h and a SQLite library; install libsqlite3-dev "
+        "for host builds or provide them in RK3568_SYSROOT")
+endif()
+
+# 不把整个 RK3568 sysroot include 目录注入宿主机构建；否则其中的 sys/stat.h 等
+# 目标机 ABI 头会覆盖宿主机系统头。SQLite 的公开头只依赖标准 stdarg.h，因此将它
+# 单独复制到构建目录，主机构建和交叉构建都只暴露这一份第三方 C API 声明。
+set(PARKING_SQLITE3_ISOLATED_INCLUDE_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/third_party")
+file(MAKE_DIRECTORY "${PARKING_SQLITE3_ISOLATED_INCLUDE_DIR}")
+configure_file(
+    "${PARKING_SQLITE3_INCLUDE_DIR}/sqlite3.h"
+    "${PARKING_SQLITE3_ISOLATED_INCLUDE_DIR}/sqlite3.h"
+    COPYONLY
 )
 
-target_include_directories(camera_demo
-    PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/inc
+add_library(parking_storage STATIC
+    src/parking/storage/memory.cpp
+    src/parking/storage/sqlite.cpp
 )
+target_include_directories(parking_storage
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inc
+    PRIVATE ${PARKING_SQLITE3_ISOLATED_INCLUDE_DIR}
+)
+target_link_libraries(parking_storage PUBLIC
+    parking_domain
+    ${PARKING_SQLITE3_LIBRARY}
+)
+target_compile_features(parking_storage PUBLIC cxx_std_11)
+target_compile_options(parking_storage PRIVATE -Wall -Wextra -Wpedantic)
+if(CAMERA_DEMO_WARNINGS_AS_ERRORS)
+    target_compile_options(parking_storage PRIVATE -Werror)
+endif()
+
+add_library(parking_control STATIC
+    src/parking/control/protocol.cpp
+    src/parking/control/server.cpp
+)
+target_include_directories(parking_control PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/inc
+)
+target_link_libraries(parking_control PUBLIC parking_domain)
+target_compile_features(parking_control PUBLIC cxx_std_11)
+target_compile_options(parking_control PRIVATE
+    -Wall
+    -Wextra
+    -Wpedantic
+)
+if(CAMERA_DEMO_WARNINGS_AS_ERRORS)
+    target_compile_options(parking_control PRIVATE -Werror)
+endif()
+
+add_executable(parkingd src/parking/apps/parkingd.cpp)
+target_link_libraries(parkingd PRIVATE
+    parking_control
+    parking_recognition
+    parking_storage
+    parking_domain
+)
+target_compile_features(parkingd PRIVATE cxx_std_11)
+target_compile_options(parkingd PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_definitions(parkingd PRIVATE
+    CAMERA_DEMO_VERSION="${PROJECT_VERSION}"
+)
+
+add_executable(parkingctl src/parking/apps/parkingctl.cpp)
+target_link_libraries(parkingctl PRIVATE parking_control parking_domain)
+target_compile_features(parkingctl PRIVATE cxx_std_11)
+target_compile_options(parkingctl PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_definitions(parkingctl PRIVATE
+    CAMERA_DEMO_VERSION="${PROJECT_VERSION}"
+)
+
+if(CAMERA_DEMO_WARNINGS_AS_ERRORS)
+    target_compile_options(parkingd PRIVATE -Werror)
+    target_compile_options(parkingctl PRIVATE -Werror)
+endif()
+if(CAMERA_DEMO_TARGET_RK3568_AARCH64)
+    target_compile_definitions(parkingd PRIVATE
+        CAMERA_DEMO_TARGET_RK3568_AARCH64=1
+    )
+    target_compile_definitions(parkingctl PRIVATE
+        CAMERA_DEMO_TARGET_RK3568_AARCH64=1
+    )
+endif()
+
+if(BUILD_TESTING)
+    add_executable(parking_domain_test
+        tests/parking/domain_test.cpp
+    )
+    target_link_libraries(parking_domain_test PRIVATE
+        parking_domain
+        parking_recognition
+        parking_storage
+    )
+    target_compile_features(parking_domain_test PRIVATE cxx_std_11)
+    target_compile_options(parking_domain_test PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+    )
+    if(CAMERA_DEMO_WARNINGS_AS_ERRORS)
+        target_compile_options(parking_domain_test PRIVATE -Werror)
+    endif()
+    add_test(NAME parking_domain COMMAND parking_domain_test)
+
+    add_executable(parking_control_test
+        tests/parking/control_test.cpp
+    )
+    target_link_libraries(parking_control_test PRIVATE
+        parking_control
+        parking_domain
+    )
+    target_compile_features(parking_control_test PRIVATE cxx_std_11)
+    target_compile_options(parking_control_test PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+    )
+    if(CAMERA_DEMO_WARNINGS_AS_ERRORS)
+        target_compile_options(parking_control_test PRIVATE -Werror)
+    endif()
+    add_test(NAME parking_control COMMAND parking_control_test)
+
+    add_executable(parking_sqlite_test
+        tests/parking/sqlite_test.cpp
+    )
+    target_link_libraries(parking_sqlite_test PRIVATE
+        parking_storage
+        parking_recognition
+        parking_domain
+    )
+    target_compile_features(parking_sqlite_test PRIVATE cxx_std_11)
+    target_compile_options(parking_sqlite_test PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+    )
+    if(CAMERA_DEMO_WARNINGS_AS_ERRORS)
+        target_compile_options(parking_sqlite_test PRIVATE -Werror)
+    endif()
+    add_test(NAME parking_sqlite COMMAND parking_sqlite_test)
+endif()
+
+add_library(camera_capture STATIC
+    src/camera/capture/buffer.cpp
+    src/camera/capture/device.cpp
+    src/camera/capture/session.cpp
+)
+target_include_directories(camera_capture PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/inc
+)
+target_compile_features(camera_capture PUBLIC cxx_std_11)
+target_compile_options(camera_capture PRIVATE -Wall -Wextra -Wpedantic)
+if(CAMERA_DEMO_WARNINGS_AS_ERRORS)
+    target_compile_options(camera_capture PRIVATE -Werror)
+endif()
+
+add_executable(camera_demo src/camera/apps/camera_demo.cpp)
+target_link_libraries(camera_demo PRIVATE camera_capture)
 
 # 将 C++11 要求附着到具体 target。其他 target 后续加入项目时，也必须显式声明
 # 自己需要的语言标准，避免开发机默认编译器版本掩盖目标板兼容性问题。
@@ -68,18 +270,25 @@ if(CAMERA_DEMO_BUILD_DRM_PROBE)
     find_library(LIBDRM_LIBRARY NAMES drm)
 
     if(LIBDRM_XF86_INCLUDE_DIR AND LIBDRM_DRM_INCLUDE_DIR AND LIBDRM_LIBRARY)
-        add_executable(drm_probe
-            src/drm_device.cpp
-            src/drm_display.cpp
-            src/drm_test_main.cpp
+        add_library(camera_drm STATIC
+            src/camera/display/device.cpp
+            src/camera/display/display.cpp
         )
-
-        target_include_directories(drm_probe PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/inc
+        target_include_directories(camera_drm
+            PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inc
+            PRIVATE
             ${LIBDRM_XF86_INCLUDE_DIR}
             ${LIBDRM_DRM_INCLUDE_DIR}
         )
-        target_link_libraries(drm_probe PRIVATE ${LIBDRM_LIBRARY})
+        target_link_libraries(camera_drm PUBLIC ${LIBDRM_LIBRARY})
+        target_compile_features(camera_drm PUBLIC cxx_std_11)
+        target_compile_options(camera_drm PRIVATE -Wall -Wextra -Wpedantic)
+        if(CAMERA_DEMO_WARNINGS_AS_ERRORS)
+            target_compile_options(camera_drm PRIVATE -Werror)
+        endif()
+
+        add_executable(drm_probe src/camera/apps/drm_probe.cpp)
+        target_link_libraries(drm_probe PRIVATE camera_drm)
         target_compile_features(drm_probe PRIVATE cxx_std_11)
         target_compile_options(drm_probe PRIVATE
             -Wall
@@ -106,21 +315,31 @@ if(CAMERA_DEMO_BUILD_DRM_PROBE)
             find_library(LIBRGA_LIBRARY NAMES rga)
 
             if(LIBRGA_INCLUDE_DIR AND LIBRGA_LIBRARY)
-                add_executable(rga_drm_test
-                    src/drm_device.cpp
-                    src/drm_display.cpp
-                    src/rga_transform.cpp
-                    src/rga_drm_test_main.cpp
+                add_library(camera_transform STATIC
+                    src/camera/display/transform.cpp
                 )
-                target_include_directories(rga_drm_test PRIVATE
-                    ${CMAKE_CURRENT_SOURCE_DIR}/inc
-                    ${LIBDRM_XF86_INCLUDE_DIR}
-                    ${LIBDRM_DRM_INCLUDE_DIR}
+                target_include_directories(camera_transform
+                    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/inc
+                    PRIVATE
                     ${LIBRGA_INCLUDE_DIR}
                 )
+                target_link_libraries(camera_transform PUBLIC ${LIBRGA_LIBRARY})
+                target_compile_features(camera_transform PUBLIC cxx_std_11)
+                target_compile_options(camera_transform PRIVATE
+                    -Wall
+                    -Wextra
+                    -Wpedantic
+                )
+                if(CAMERA_DEMO_WARNINGS_AS_ERRORS)
+                    target_compile_options(camera_transform PRIVATE -Werror)
+                endif()
+
+                add_executable(rga_drm_test
+                    src/camera/apps/rga_drm_test.cpp
+                )
                 target_link_libraries(rga_drm_test PRIVATE
-                    ${LIBDRM_LIBRARY}
-                    ${LIBRGA_LIBRARY}
+                    camera_drm
+                    camera_transform
                 )
                 target_compile_features(rga_drm_test PRIVATE cxx_std_11)
                 target_compile_options(rga_drm_test PRIVATE
@@ -142,22 +361,12 @@ if(CAMERA_DEMO_BUILD_DRM_PROBE)
                 install(TARGETS rga_drm_test RUNTIME DESTINATION bin)
 
                 add_executable(camera_display_once
-                    src/v4l2_device.cpp
-                    src/v4l2_buffer.cpp
-                    src/drm_device.cpp
-                    src/drm_display.cpp
-                    src/rga_transform.cpp
-                    src/camera_display_once_main.cpp
-                )
-                target_include_directories(camera_display_once PRIVATE
-                    ${CMAKE_CURRENT_SOURCE_DIR}/inc
-                    ${LIBDRM_XF86_INCLUDE_DIR}
-                    ${LIBDRM_DRM_INCLUDE_DIR}
-                    ${LIBRGA_INCLUDE_DIR}
+                    src/camera/apps/display_once.cpp
                 )
                 target_link_libraries(camera_display_once PRIVATE
-                    ${LIBDRM_LIBRARY}
-                    ${LIBRGA_LIBRARY}
+                    camera_capture
+                    camera_drm
+                    camera_transform
                 )
                 target_compile_features(camera_display_once PRIVATE cxx_std_11)
                 target_compile_options(camera_display_once PRIVATE
@@ -179,23 +388,12 @@ if(CAMERA_DEMO_BUILD_DRM_PROBE)
                 install(TARGETS camera_display_once RUNTIME DESTINATION bin)
 
                 add_executable(camera_display_stream
-                    src/capture_session.cpp
-                    src/v4l2_device.cpp
-                    src/v4l2_buffer.cpp
-                    src/drm_device.cpp
-                    src/drm_display.cpp
-                    src/rga_transform.cpp
-                    src/camera_display_stream_main.cpp
-                )
-                target_include_directories(camera_display_stream PRIVATE
-                    ${CMAKE_CURRENT_SOURCE_DIR}/inc
-                    ${LIBDRM_XF86_INCLUDE_DIR}
-                    ${LIBDRM_DRM_INCLUDE_DIR}
-                    ${LIBRGA_INCLUDE_DIR}
+                    src/camera/apps/display_stream.cpp
                 )
                 target_link_libraries(camera_display_stream PRIVATE
-                    ${LIBDRM_LIBRARY}
-                    ${LIBRGA_LIBRARY}
+                    camera_capture
+                    camera_drm
+                    camera_transform
                 )
                 target_compile_features(camera_display_stream PRIVATE cxx_std_11)
                 target_compile_options(camera_display_stream PRIVATE
@@ -233,4 +431,4 @@ if(CAMERA_DEMO_BUILD_DRM_PROBE)
 endif()
 
 # `cmake --install` 会把程序放入 staging_dir/bin，便于之后统一复制到开发板。
-install(TARGETS camera_demo RUNTIME DESTINATION bin)
+install(TARGETS camera_demo parkingd parkingctl RUNTIME DESTINATION bin)

@@ -68,12 +68,23 @@ toolchain 构建。禁止把宿主机头文件或 x86_64 库加入交叉编译 i
 ## 3. 文件和模块组织
 
 - `.hpp` 只声明公共接口和必要的数据类型；复杂实现放在 `.cpp`。
+- 子系统使用目录表达职责，文件名使用简短名词，不再重复完整类名。例如
+  `src/parking/storage/sqlite.cpp`，而不是
+  `src/parking/sqlite_parking_repository.cpp`。
+- 同一模块的头文件和实现文件采用相同相对路径与基本名，例如
+  `inc/parking/control/protocol.hpp` 对应 `src/parking/control/protocol.cpp`。
+- 可执行程序入口统一放在子系统的 `apps/` 目录；测试文件使用
+  `<模块>_test.cpp`，不把可执行目标名和实现类全写入文件名。
+- 每个 `.cpp` 开头必须用两行左右说明“文件用途”和“所属层次”，帮助读者在不展开整个
+  文件时判断职责和禁止依赖。
 - 每个头文件使用 `#pragma once`，不依赖其他头文件偶然包含的符号。
 - Linux/V4L2/DRM 原始类型应限制在相应适配层，不向业务 pipeline 大面积泄漏。
 - fd、mmap 地址、GEM handle、framebuffer ID 等资源必须有明确唯一所有者。
 - 能使用 RAII 自动释放的资源，不依赖调用方记住手动清理。
 - 禁止复制拥有 fd 或 mmap 资源的对象；根据需要实现移动构造和移动赋值。
 - `main.cpp` 只负责参数解析、模块装配、输出最终结果和顶层错误处理。
+
+停车子系统的当前目录和依赖方向见 [源码目录与命名规范](source_layout.md)。
 
 ## 4. 命名规范
 

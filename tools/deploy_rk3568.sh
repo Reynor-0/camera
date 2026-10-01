@@ -27,6 +27,8 @@ binaries=(
     rga_drm_test
     camera_display_once
     camera_display_stream
+    parkingd
+    parkingctl
 )
 
 print_usage()

@@ -25,9 +25,9 @@ V4L2 API 和 fd 生命周期，但不能证明 RK3568 的 RKISP buffer 能被 RK
 本阶段继续保留现有的小型工程结构：
 
 ```text
-inc/v4l2_buffer.hpp       对外接口、帧视图和所有权注释
-src/v4l2_buffer.cpp       VIDIOC_EXPBUF、fd 保存和清理
-src/main.cpp              --export-dmabuf 参数及诊断输出
+inc/camera/capture/buffer.hpp  对外接口、帧视图和所有权注释
+src/camera/capture/buffer.cpp  VIDIOC_EXPBUF、fd 保存和清理
+src/camera/apps/camera_demo.cpp  --export-dmabuf 参数及诊断输出
 tools/test_virtual_v4l2_probe.sh
                           vivid single/multi-planar 自动验证
 docs/dma_buf_export_plan.md

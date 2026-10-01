@@ -20,11 +20,11 @@
 ## 2. 代码组织
 
 ```text
-inc/drm_device.hpp      DRM fd 与 connector/mode/encoder/CRTC 探测接口
-src/drm_device.cpp      libdrm 查询、自动选择和查询对象的 RAII 清理
-inc/drm_display.hpp     Dumb framebuffer 与独占 CRTC 会话接口
-src/drm_display.cpp     buffer 生命周期、legacy modeset 和逆序清理
-src/drm_test_main.cpp   命令行解析、结果输出与小阶段测试流程
+inc/camera/display/device.hpp   DRM fd 与 connector/mode/encoder/CRTC 探测接口
+src/camera/display/device.cpp   libdrm 查询、自动选择和查询对象的 RAII 清理
+inc/camera/display/display.hpp  Dumb framebuffer 与独占 CRTC 会话接口
+src/camera/display/display.cpp  buffer 生命周期、legacy modeset 和逆序清理
+src/camera/apps/drm_probe.cpp   命令行解析、结果输出与小阶段测试流程
 tools/run_drm_color_bars_rk3568.sh  板端桌面停止、测试和恢复编排
 tools/run_drm_page_flip_rk3568.sh   板端动态翻页测试和恢复编排
 ```

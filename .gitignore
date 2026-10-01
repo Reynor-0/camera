@@ -11,6 +11,8 @@ build-*/
 
 #
 .clangd
-
+AIparking/
+resume/
 #vs_code
 .vscode/
+

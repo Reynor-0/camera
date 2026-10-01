@@ -3,6 +3,12 @@
 本项目在 RK3568 Buildroot 开发板上验证摄像头采集、DMA-BUF、RGA 硬件旋转/颜色
 转换以及 DRM/KMS 独占显示链路。
 
+0.15.0 在不改动 Camera 数据面的前提下，新增停车业务 C++11 领域模型、SQLite 单写者
+repository、`parkingd` 和 `parkingctl` 手动模拟刷卡控制面。该版本已经在 RK3568 实板
+完成入场、进程重启恢复、持久幂等重放、重复入场拒绝和出场历史保留验证；尚未接入
+真实 RFID 或 Camera 车牌识别。
+实际进度见 [AIparking 迁移实施进度](docs/aiparking_implementation_progress.md)。
+
 当前已跑通的主链路为：
 
 ```text
